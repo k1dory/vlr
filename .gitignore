@@ -1,0 +1,47 @@
+# --- vlr binaries ---
+/vlr
+/vlr.exe
+/vlr-linux-amd64
+/vlr-*
+*.exe
+
+# --- secrets / runtime state (NEVER commit: holds private keys) ---
+/_smoke/
+/_e2e/
+*.config.json
+config.json
+vlr.config.json
+data/
+nodes.json
+state.json
+*.tmp
+
+# generated configs that contain keys
+wg-cascade.conf
+*.wg.conf
+xray.config.json
+/etc/
+
+# --- Go ---
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+vendor/
+/dist/
+/build/
+go.work
+go.work.sum
+
+# --- env / editor / OS ---
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

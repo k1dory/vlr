@@ -1,0 +1,19 @@
+[Unit]
+Description=vlr VPN node daemon (VLESS+Reality cascade)
+After=network-online.target wg-quick@wg-cascade.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vlr serve --config /etc/vlr/config.json
+Restart=on-failure
+RestartSec=3
+# vlr only needs to read its config and reach the network; tighten as needed.
+AmbientCapabilities=
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/etc/vlr/data
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
