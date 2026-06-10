@@ -61,6 +61,9 @@ vlr cascade check        # [OK]/[FAIL] по сайтам через каскад
 ```
 
 > Обновление на сервере: `cd /opt/vlr && git pull && ./install.sh`.
+>
+> Полное удаление (декларативный откат всего, что ставилось — бинарь, юнит,
+> туннель, EU-выход, опц. Go): `vlr uninstall` (см. [docs/UNINSTALL.md](docs/UNINSTALL.md)).
 
 ## Why these choices
 

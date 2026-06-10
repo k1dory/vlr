@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/k1dory/vlr/internal/cascade"
 	"github.com/k1dory/vlr/internal/config"
+	"github.com/k1dory/vlr/internal/ledger"
 	"github.com/k1dory/vlr/internal/wireguard"
 )
 
@@ -126,6 +128,16 @@ func cmdCascadeUp(args []string) error {
 	if out, err := exec.CommandContext(ctx, "wg-quick", "up", *iface).CombinedOutput(); err != nil {
 		return fmt.Errorf("wg-quick up %s: %w\n%s", *iface, err, out)
 	}
+
+	// Record what we just created so `vlr uninstall` can reverse it. The EU exit
+	// stores host/user/port/key for remote teardown — never the password.
+	lp := ledger.DefaultPath(filepath.Dir(savePath))
+	_ = ledger.Record(lp, ledger.KindFile, wgPath, nil)
+	_ = ledger.Record(lp, ledger.KindWGIface, *iface, nil)
+	_ = ledger.Record(lp, ledger.KindEUExit, *euHost, map[string]string{
+		"user": *euUser, "port": fmt.Sprintf("%d", *euPort),
+		"iface": *iface, "key_path": *euKey,
+	})
 
 	// 5. Confirm handshake, then healthcheck through the cascade.
 	time.Sleep(2 * time.Second)

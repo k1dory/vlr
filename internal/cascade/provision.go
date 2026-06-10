@@ -115,6 +115,24 @@ func ProvisionExit(ctx context.Context, ssh SSHOpts, p ExitProvisionParams) (euP
 	return "", fmt.Errorf("EU public key not found in output:\n%s", out)
 }
 
+// TeardownExit reverses ProvisionExit on the EU box: brings the interface down
+// (which runs the iptables PostDown), disables the unit and removes the conf +
+// keys. Idempotent — tolerates an already-clean box.
+func TeardownExit(ctx context.Context, ssh SSHOpts, iface string) (string, error) {
+	if iface == "" {
+		iface = "wg-cascade"
+	}
+	script := strings.NewReplacer("{{IFACE}}", iface).Replace(exitTeardownTemplate)
+	return runSSH(ctx, ssh, "bash -s", script)
+}
+
+const exitTeardownTemplate = `set -uo pipefail
+wg-quick down {{IFACE}} 2>/dev/null || true
+systemctl disable wg-quick@{{IFACE}} 2>/dev/null || true
+rm -f /etc/wireguard/{{IFACE}}.conf /etc/wireguard/{{IFACE}}.key /etc/wireguard/{{IFACE}}.pub
+echo "VLR_EU_TEARDOWN_OK"
+`
+
 // runSSH executes remoteCmd on the EU box, feeding stdin to it, using key or
 // password auth. It shells out to the system ssh (and sshpass for passwords) so
 // the vlr binary stays free of an SSH library dependency.

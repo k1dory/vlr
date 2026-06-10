@@ -33,12 +33,19 @@ ensure_go() {
   echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh >/dev/null
   export PATH="$PATH:/usr/local/go/bin"
   command -v go >/dev/null 2>&1 || { echo "Go install failed"; exit 1; }
+  GO_INSTALLED_BY_VLR=1   # so `vlr uninstall --remove-go` knows it may remove it
 }
+
+# rec records an install action into the ledger via the freshly-installed binary.
+# Best-effort: never fail the install if recording fails.
+rec() { sudo "$BIN" ledger record --config "$CONFIG" --kind "$1" --target "$2" 2>/dev/null || true; }
 
 ensure_go
 echo "==> building vlr with $(go version)"
 cd "$SRC_DIR"
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o vlr ./cmd/vlr
+
+CONFIG="/etc/vlr/config.json"
 
 echo "==> installing to $BIN"
 if [ -w "$PREFIX/bin" ]; then
@@ -46,17 +53,19 @@ if [ -w "$PREFIX/bin" ]; then
 else
   sudo install -m 0755 vlr "$BIN"
 fi
+# From here the binary exists, so it can own the install ledger.
+rec file "$BIN"
+[ "${GO_INSTALLED_BY_VLR:-0}" = "1" ] && rec go-toolchain /usr/local/go
 
 echo "==> installing systemd unit (if systemd present)"
 if command -v systemctl >/dev/null 2>&1; then
   sudo cp deploy/systemd/vlr.service /etc/systemd/system/vlr.service
   sudo systemctl daemon-reload
+  rec systemd-unit /etc/systemd/system/vlr.service
 fi
 
 echo
 echo "vlr установлен: $(command -v vlr)  ($(vlr version))"
-
-CONFIG="/etc/vlr/config.json"
 
 # Interactive provisioning: show the mode menu, create the config, enable the
 # service. Only on a real terminal — in a pipe/CI we just print the next step.
@@ -75,6 +84,7 @@ if [ -t 0 ] && [ -t 1 ]; then
   if [ -f "$CONFIG" ] && command -v systemctl >/dev/null 2>&1; then
     echo "==> включаю и запускаю сервис vlr"
     sudo systemctl enable --now vlr
+    rec systemd-enabled vlr
     sleep 1
     sudo systemctl --no-pager --full status vlr | head -n 6 || true
   fi

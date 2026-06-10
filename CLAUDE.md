@@ -65,6 +65,18 @@ daemon,cascade,config,util}` · `deploy/` · `docs/`.
   Xray render/restart is still manual via `vlr render`).
 - TG bot + web subscription frontend (per White_Rabbit design system).
 
+## Declarative install/uninstall (ledger)
+
+Everything install touches is recorded append-only in `/etc/vlr/ledger.jsonl`
+(`internal/ledger`): install.sh records binary/unit/enable/go-toolchain (Go only
+if it installed it), `vlr init` records config dir/file, `vlr cascade up` records
+the local WG iface + EU exit (host/user/port/key — never the password).
+`vlr uninstall` reverses it in safe order (stop daemon → EU teardown → local wg →
+unit → go/pkgs opt-in → binary → /etc/vlr last) and is idempotent. It also works
+without the ledger via a declarative fallback derived from the config. Flags:
+`--yes --keep-config --skip-eu --remove-go --remove-packages --eu-key/--eu-pass`.
+Go/wireguard removed ONLY if vlr installed them AND opt-in. `cmd/vlr/uninstall.go`.
+
 ## Cascade automation (vlr cascade up)
 
 `vlr cascade up --eu-host <ip> --eu-key|--eu-pass` runs from the RU node and

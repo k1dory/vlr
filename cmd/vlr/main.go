@@ -29,6 +29,7 @@ import (
 	"github.com/k1dory/vlr/internal/cascade"
 	"github.com/k1dory/vlr/internal/config"
 	"github.com/k1dory/vlr/internal/daemon"
+	"github.com/k1dory/vlr/internal/ledger"
 	"github.com/k1dory/vlr/internal/reality"
 	"github.com/k1dory/vlr/internal/store"
 	"github.com/k1dory/vlr/internal/subscription"
@@ -64,6 +65,10 @@ func main() {
 		err = cmdRender(args)
 	case "serve":
 		err = cmdServe(args)
+	case "ledger":
+		err = cmdLedger(args)
+	case "uninstall":
+		err = cmdUninstall(args)
 	case "status":
 		err = cmdStatus(args)
 	case "version", "-v", "--version":
@@ -97,6 +102,8 @@ COMMANDS
   render      print the Xray config
   serve       run the node daemon for this node's role
   status      show node status
+  uninstall   reverse everything vlr installed (--yes, --keep-config, --remove-go, --skip-eu)
+  ledger      record|list the install ledger
   version     print version
 
 Run "vlr init" on a terminal for the interactive mode menu (1/2/3).
@@ -233,6 +240,13 @@ func cmdInit(args []string) error {
 
 	if err := config.Save(*out, c); err != nil {
 		return err
+	}
+	// Record for `vlr uninstall`.
+	lp := ledger.DefaultPath(filepath.Dir(*out))
+	_ = ledger.Record(lp, ledger.KindDir, filepath.Dir(*out), nil)
+	_ = ledger.Record(lp, ledger.KindFile, *out, nil)
+	if c.DataDir != "" {
+		_ = ledger.Record(lp, ledger.KindDir, c.DataDir, nil)
 	}
 	fmt.Printf("\n✓ конфиг записан: %s  (режим=%s, узел=%s)\n", *out, *role, *nodeID)
 	if c.Entry.PublicKey != "" {
