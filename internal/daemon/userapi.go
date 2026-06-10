@@ -87,10 +87,7 @@ func createUser(w http.ResponseWriter, r *http.Request, cfg *config.Config, st *
 		http.Error(w, "uuid", http.StatusInternalServerError)
 		return
 	}
-	profile := req.Profile
-	if profile == "" {
-		profile = "mobile"
-	}
+	profile := req.Profile // "" = plain Reality (all devices); "vision" = mobile-only
 	sid := ""
 	if len(cfg.Entry.ShortIDs) > 0 {
 		sid = cfg.Entry.ShortIDs[len(st.Users())%len(cfg.Entry.ShortIDs)]

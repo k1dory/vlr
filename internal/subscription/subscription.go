@@ -34,8 +34,10 @@ func Link(entry config.EntryConfig, u store.User) string {
 		sid = entry.ShortIDs[0]
 	}
 	q.Set("sid", sid)
-	// Vision flow only for non-desktop profiles (mirrors the inbound clients).
-	if u.Profile != "desktop" {
+	// Vision is opt-in (profile=="vision"); must mirror the inbound client's flow,
+	// since Xray pins it per UUID. Default = plain VLESS+Reality (works on all
+	// clients incl. Windows/macOS).
+	if u.Profile == "vision" {
 		q.Set("flow", "xtls-rprx-vision")
 	}
 	q.Set("spx", "/")

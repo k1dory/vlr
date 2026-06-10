@@ -7,6 +7,13 @@ PREFIX="${PREFIX:-/usr/local}"
 BIN="$PREFIX/bin/vlr"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Seed .env from the example on first run (unconditionally), so DOMAIN_FOR_TLS /
+# OWN_DOMAIN / SPLIT_RU_DOMAINS apply on the very first `vlr init`.
+if [ ! -f "$SRC_DIR/.env" ] && [ -f "$SRC_DIR/env.example" ]; then
+  cp "$SRC_DIR/env.example" "$SRC_DIR/.env"
+  echo "==> создал .env из env.example (правь домены там)"
+fi
+
 # A Go installed to /usr/local/go is only on PATH via /etc/profile.d/go.sh, which
 # applies to future login shells — not to this script or a re-run in the same
 # session. Add it here so an already-installed Go is actually found (the reason
@@ -93,8 +100,6 @@ echo "vlr установлен: $(command -v vlr)  ($(vlr version))"
 # Interactive provisioning: show the mode menu, create the config, enable the
 # service. Only on a real terminal — in a pipe/CI we just print the next step.
 if [ -t 0 ] && [ -t 1 ]; then
-  # seed .env from the example so DOMAIN_FOR_TLS (console.yandex.cloud) applies
-  [ -f "$SRC_DIR/.env" ] || cp "$SRC_DIR/env.example" "$SRC_DIR/.env" 2>/dev/null || true
   if [ -f "$CONFIG" ]; then
     echo "конфиг уже есть: $CONFIG  (перенастроить: vlr init)"
   else

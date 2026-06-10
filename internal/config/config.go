@@ -230,6 +230,11 @@ func (c *Config) Validate() error {
 	if c.Entry.Fingerprint == "" {
 		return fmt.Errorf("entry.fingerprint is required")
 	}
+	// Default the Xray apply target so old configs (written before this field
+	// existed) still auto-apply on `vlr user add` instead of silently no-op'ing.
+	if c.Xray.ConfigPath == "" {
+		c.Xray.ConfigPath = "/usr/local/etc/xray/config.json"
+	}
 	if c.Role == RoleChild {
 		if c.Child.MainURL == "" {
 			return fmt.Errorf("child.main_url is required for role=child")

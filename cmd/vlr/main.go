@@ -390,7 +390,7 @@ func cmdUser(args []string) error {
 	cfgPath := fs.String("config", "", "config path")
 	email := fs.String("email", "", "optional email label")
 	extID := fs.String("id", "", "optional external/system id")
-	profile := fs.String("profile", "mobile", "mobile|desktop (desktop skips Vision)")
+	profile := fs.String("profile", "", "\"vision\" = XTLS-Vision (mobile only); empty = plain Reality (all devices)")
 	tgID := fs.Int64("telegram-id", 0, "optional Telegram user id")
 	ref := fs.String("ref", "", "rm/link: user ref (uuid|email|id|telegram-id)")
 	noApply := fs.Bool("no-apply", false, "do not auto-render+reload Xray")
@@ -404,9 +404,19 @@ func cmdUser(args []string) error {
 	if err != nil {
 		return err
 	}
-	// positional ref for rm/link: `vlr user rm <ref>`
+	// ref for rm/link: positional `vlr user rm <ref>`, or any typed flag.
 	if *ref == "" && len(fs.Args()) > 0 {
 		*ref = fs.Args()[0]
+	}
+	if *ref == "" {
+		switch {
+		case *tgID != 0:
+			*ref = fmt.Sprintf("%d", *tgID)
+		case *email != "":
+			*ref = *email
+		case *extID != "":
+			*ref = *extID
+		}
 	}
 
 	switch sub {
@@ -458,9 +468,6 @@ func addUser(c *config.Config, st *store.Store, email, extID string, tgID int64,
 	uuid, err := util.NewUUID()
 	if err != nil {
 		return store.User{}, err
-	}
-	if profile == "" {
-		profile = "mobile"
 	}
 	sid := ""
 	if len(c.Entry.ShortIDs) > 0 {

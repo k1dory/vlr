@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/k1dory/vlr/internal/config"
 	"github.com/k1dory/vlr/internal/ledger"
@@ -59,9 +60,55 @@ func cmdUp(args []string) error {
 	if err := xray.Apply(c, st.Users()); err != nil {
 		return fmt.Errorf("apply xray: %w", err)
 	}
-	fmt.Println("✓ Xray поднят:", c.Xray.ConfigPath)
-	fmt.Printf("  юзеров: %d. Добавить: vlr user add  (или POST /v1/users)\n", len(st.Users()))
+	_ = exec.Command("systemctl", "enable", "xray").Run()
+	_ = exec.Command("systemctl", "restart", "xray").Run()
+	fmt.Println("✓ Xray применён:", c.Xray.ConfigPath)
+
+	verifyXray(c)
+	fmt.Printf("\n  юзеров: %d. Добавить: vlr user add  (или POST /v1/users)\n", len(st.Users()))
 	return nil
+}
+
+// verifyXray runs quick self-checks and prints what's wrong, so "ничего не
+// работает" becomes a concrete diagnosis instead of a guess.
+func verifyXray(c *config.Config) {
+	fmt.Println("\n== диагностика ==")
+
+	// 1. config valid?
+	if _, err := exec.LookPath("xray"); err == nil {
+		if out, err := exec.Command("xray", "-test", "-c", c.Xray.ConfigPath).CombinedOutput(); err != nil {
+			fmt.Printf("✗ конфиг Xray невалиден:\n%s\n", string(out))
+		} else {
+			fmt.Println("✓ конфиг Xray валиден")
+		}
+	}
+
+	// 2. service active?
+	if out, _ := exec.Command("systemctl", "is-active", "xray").Output(); strings.TrimSpace(string(out)) == "active" {
+		fmt.Println("✓ сервис xray запущен")
+	} else {
+		fmt.Println("✗ сервис xray НЕ активен — смотри: journalctl -u xray -n 30 --no-pager")
+	}
+
+	// 3. listening on the entry port?
+	port := c.Entry.Port
+	if port == 0 {
+		port = 443
+	}
+	listening := false
+	if out, err := exec.Command("ss", "-tlnH").Output(); err == nil {
+		listening = strings.Contains(string(out), fmt.Sprintf(":%d ", port))
+	}
+	if listening {
+		fmt.Printf("✓ Xray слушает :%d\n", port)
+	} else {
+		fmt.Printf("✗ никто не слушает :%d (Xray не стартовал?)\n", port)
+	}
+
+	// 4. firewall reminder — the #1 cause on cloud VMs.
+	fmt.Printf("→ проверь, что входящий TCP %d открыт в Security Group/файрволе провайдера\n", port)
+	fmt.Printf("  (Yandex Cloud: Консоль → Сети → Группы безопасности → разрешить TCP %d из 0.0.0.0/0)\n", port)
+	fmt.Printf("  снаружи: nc -vz %s %d\n", c.Entry.Host, port)
 }
 
 func installXray() error {

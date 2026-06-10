@@ -89,10 +89,11 @@ func Render(c *config.Config, users []store.User) ([]byte, error) {
 			"id":    u.UUID,
 			"email": u.Email,
 		}
-		// Vision only for mobile profiles. Desktop gets plain VLESS+Reality —
-		// XTLS Vision has shown throughput regressions on desktop clients, and
-		// the operator explicitly wants desktop to skip it.
-		if u.Profile != "desktop" {
+		// Vision is OPT-IN (profile=="vision"), because XTLS-Vision breaks many
+		// desktop (Windows/macOS) clients and Xray pins the flow per UUID, so one
+		// credential can't be vision on a phone and plain on a PC. Default = plain
+		// VLESS+Reality, which works on every client and still resists RU DPI.
+		if u.Profile == "vision" {
 			cl["flow"] = "xtls-rprx-vision"
 		}
 		clients = append(clients, cl)
