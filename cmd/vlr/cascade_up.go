@@ -124,10 +124,19 @@ func cmdCascadeUp(args []string) error {
 		return err
 	}
 
-	// 4. Write the RU wg-quick config and bring the interface up.
+	// 4. Write the RU wg-quick config and bring the interface up. Ensure the
+	// local WireGuard tools and /etc/wireguard exist first (the RU node may not
+	// have them — we only installed WireGuard on the EU box so far).
+	installedWG, werr := ensureWireguard(context.Background())
+	if werr != nil {
+		return werr
+	}
 	ruConf, err := wireguard.RenderEntry(c)
 	if err != nil {
 		return err
+	}
+	if err := os.MkdirAll("/etc/wireguard", 0o700); err != nil {
+		return fmt.Errorf("mkdir /etc/wireguard: %w", err)
 	}
 	wgPath := "/etc/wireguard/" + *iface + ".conf"
 	if err := os.WriteFile(wgPath, []byte(ruConf), 0o600); err != nil {
@@ -144,6 +153,9 @@ func cmdCascadeUp(args []string) error {
 	lp := ledger.DefaultPath(filepath.Dir(savePath))
 	if installedSshpass {
 		_ = ledger.Record(lp, ledger.KindPackage, "sshpass", nil)
+	}
+	if installedWG {
+		_ = ledger.Record(lp, ledger.KindPackage, "wireguard", nil)
 	}
 	_ = ledger.Record(lp, ledger.KindFile, wgPath, nil)
 	_ = ledger.Record(lp, ledger.KindWGIface, *iface, nil)
@@ -179,44 +191,60 @@ func cmdCascadeUp(args []string) error {
 	return nil
 }
 
-// ensureSshpass makes sure sshpass is available for password SSH auth, installing
-// it via the node's package manager if missing. Returns whether it installed it
-// (so uninstall can remove it). Runs as root on the RU node, so no sudo.
-func ensureSshpass(ctx context.Context) (installed bool, err error) {
-	if _, e := exec.LookPath("sshpass"); e == nil {
+// ensurePackage makes sure checkBin is available, installing it via the node's
+// package manager if missing. pkgByMgr maps a manager binary to the package name
+// to install (names differ across distros); defaultPkg is the fallback. Returns
+// whether it installed anything (so uninstall can remove it). Root, no sudo.
+func ensurePackage(ctx context.Context, checkBin string, pkgByMgr map[string]string, defaultPkg string) (installed bool, err error) {
+	if _, e := exec.LookPath(checkBin); e == nil {
 		return false, nil
 	}
-	fmt.Println("==> ставлю sshpass (нужен для входа по паролю)")
-	type pm struct {
-		bin     string
-		install []string
-		update  []string
-	}
-	managers := []pm{
-		{"apt-get", []string{"install", "-y", "sshpass"}, []string{"update", "-qq"}},
-		{"apk", []string{"add", "sshpass"}, nil},
-		{"dnf", []string{"install", "-y", "sshpass"}, nil},
-		{"yum", []string{"install", "-y", "sshpass"}, nil},
+	managers := []struct {
+		bin       string
+		insFlags  []string
+		updateCmd []string
+	}{
+		{"apt-get", []string{"install", "-y"}, []string{"update", "-qq"}},
+		{"apk", []string{"add"}, nil},
+		{"dnf", []string{"install", "-y"}, nil},
+		{"yum", []string{"install", "-y"}, nil},
 	}
 	for _, m := range managers {
 		if _, e := exec.LookPath(m.bin); e != nil {
 			continue
 		}
+		pkg := defaultPkg
+		if p, ok := pkgByMgr[m.bin]; ok {
+			pkg = p
+		}
+		fmt.Printf("==> ставлю %s (%s)\n", pkg, checkBin)
 		run := func(args []string) error {
 			c := exec.CommandContext(ctx, m.bin, args...)
 			c.Stdout, c.Stderr = os.Stdout, os.Stderr
 			c.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 			return c.Run()
 		}
-		if run(m.install) != nil && m.update != nil {
-			_ = run(m.update) // stale package lists -> refresh and retry once
-			_ = run(m.install)
+		ins := append(append([]string{}, m.insFlags...), pkg)
+		if run(ins) != nil && m.updateCmd != nil {
+			_ = run(m.updateCmd) // stale lists -> refresh and retry once
+			_ = run(ins)
 		}
-		if _, e := exec.LookPath("sshpass"); e == nil {
+		if _, e := exec.LookPath(checkBin); e == nil {
 			return true, nil
 		}
 	}
-	return false, fmt.Errorf("не смог поставить sshpass — поставь вручную (apt-get install -y sshpass) или используй --eu-key")
+	return false, fmt.Errorf("не смог поставить %s — поставь вручную или используй другой способ", defaultPkg)
+}
+
+// ensureSshpass installs sshpass for password SSH auth.
+func ensureSshpass(ctx context.Context) (bool, error) {
+	return ensurePackage(ctx, "sshpass", nil, "sshpass")
+}
+
+// ensureWireguard installs wireguard-tools (wg, wg-quick) on the local RU node.
+func ensureWireguard(ctx context.Context) (bool, error) {
+	return ensurePackage(ctx, "wg-quick",
+		map[string]string{"apt-get": "wireguard"}, "wireguard-tools")
 }
 
 // cascadeUpWizard interactively fills the EU exit parameters.
