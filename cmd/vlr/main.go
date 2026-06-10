@@ -86,16 +86,17 @@ USAGE
   vlr <command> [flags]
 
 COMMANDS
-  init        provision this node (--role standalone|child|main)
-  keys        generate Reality / WireGuard keys
-  cascade     gen|test the RU->EU WireGuard hop
-  user        add|rm|list|link
+  init        guided setup wizard (run with no flags) or --role standalone|child|main
+  keys        generate Reality / WireGuard keys (--type reality|wireguard)
+  cascade     gen|exit|test the RU->EU WireGuard hop
+  user        add|rm|list|link  (--email, --telegram-id, --profile mobile|desktop)
   node        register|list (main role)
   render      print the Xray config
-  serve       run the node daemon
+  serve       run the node daemon for this node's role
   status      show node status
   version     print version
 
+Run "vlr init" on a terminal for the interactive mode menu (1/2/3).
 Use "vlr <command> -h" for command flags.
 `)
 }
@@ -131,12 +132,18 @@ func cmdInit(args []string) error {
 	sni := fs.String("sni", "", "Reality SNI (default: picked from recommended)")
 	region := fs.String("region", "", "free-form region label")
 	mainURL := fs.String("main-url", "", "child: main server base URL, e.g. https://main/v1")
+	token := fs.String("token", "", "child: node token for heartbeat auth")
+	pullBearer := fs.String("pull-bearer", "", "child: bearer the main must present to pull")
 	apiListen := fs.String("api-listen", "0.0.0.0:8443", "main: API listen address")
 	out := fs.String("config", config.DefaultPath(), "config path to write")
 	_ = fs.Parse(args)
 
+	// No node id on an interactive terminal => run the guided wizard (mode menu).
+	if *nodeID == "" && isInteractive() {
+		runInitWizard(role, nodeID, host, region, mainURL, apiListen, token, pullBearer)
+	}
 	if *nodeID == "" {
-		return fmt.Errorf("--node-id is required")
+		return fmt.Errorf("--node-id is required (or run `vlr init` on a terminal for the guided setup)")
 	}
 	c := &config.Config{
 		Role:    config.Role(*role),
@@ -186,8 +193,8 @@ func cmdInit(args []string) error {
 		}
 		if config.Role(*role) == config.RoleChild {
 			c.Child = config.ChildConfig{
-				MainURL: *mainURL, HeartbeatSeconds: 20,
-				PullListen: "127.0.0.1:9777",
+				MainURL: *mainURL, Token: *token, PullBearer: *pullBearer,
+				HeartbeatSeconds: 20, PullListen: "127.0.0.1:9777",
 			}
 		}
 	default:
@@ -197,12 +204,21 @@ func cmdInit(args []string) error {
 	if err := config.Save(*out, c); err != nil {
 		return err
 	}
-	fmt.Printf("wrote %s (role=%s, node=%s)\n", *out, *role, *nodeID)
+	fmt.Printf("\n✓ конфиг записан: %s  (режим=%s, узел=%s)\n", *out, *role, *nodeID)
 	if c.Entry.PublicKey != "" {
-		fmt.Printf("reality public key: %s\n", c.Entry.PublicKey)
-		fmt.Printf("reality SNI:        %s\n", c.Entry.SNI)
-		fmt.Printf("fingerprint:        %s\n", c.Entry.Fingerprint)
-		fmt.Println("next: `vlr cascade gen` then `vlr user add --email you@x`")
+		fmt.Printf("  публичный адрес:  %s:%d\n", c.Entry.Host, c.Entry.Port)
+		fmt.Printf("  reality pubkey:   %s\n", c.Entry.PublicKey)
+		fmt.Printf("  reality SNI:      %s\n", c.Entry.SNI)
+		fmt.Printf("  fingerprint:      %s\n", c.Entry.Fingerprint)
+		fmt.Println("\nдальше:")
+		fmt.Println("  vlr cascade up --eu-host <IP> --eu-user root --eu-key ~/.ssh/id_ed25519   # каскад RU→EU одной командой")
+		fmt.Println("  vlr user add --email you@example.com --telegram-id <ID>")
+		fmt.Println("  vlr render > /usr/local/etc/xray/config.json && systemctl restart xray")
+	}
+	if c.Role == config.RoleMain {
+		fmt.Println("\nдальше:")
+		fmt.Println("  vlr node register --node-id <child> --pull-url https://child:9777/v1/pull --bearer <token>")
+		fmt.Println("  systemctl enable --now vlr")
 	}
 	return nil
 }
@@ -237,9 +253,15 @@ func cmdKeys(args []string) error {
 
 func cmdCascade(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: vlr cascade gen|exit|test")
+		return fmt.Errorf("usage: vlr cascade up|check|gen|exit|test")
 	}
 	sub, rest := args[0], args[1:]
+	if sub == "up" {
+		return cmdCascadeUp(rest)
+	}
+	if sub == "check" {
+		return cmdCascadeCheck(rest)
+	}
 	fs := newFlagSet("cascade")
 	cfgPath := fs.String("config", "", "config path")
 	switch sub {

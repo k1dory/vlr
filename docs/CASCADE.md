@@ -27,31 +27,54 @@ DC↔DC is not censored, so the inner hop needs no camouflage — pure speed win
      default route into tunnel                        MASQUERADE -> eth0 -> Internet
 ```
 
-## Generate the configs
+## Bring up the cascade — one command from the RU node
 
-On the **RU** node (after `vlr init` and filling `cascade` keys/endpoint):
-
-```bash
-vlr cascade gen > /etc/wireguard/wg-cascade.conf
-```
-
-On the **EU** node:
-
-```bash
-vlr cascade exit \
-    --entry-pubkey <RU_WG_PUBLIC_KEY> \
-    --entry-ip 10.66.0.2/32 \
-    --listen 51820 --wan eth0 \
-    > /etc/wireguard/wg-cascade.conf
-# prints the EU public key -> put it into the RU config's exit_public_key
-```
-
-Bring up both:
+You do **not** log into the EU box. From the **RU** node, `vlr cascade up` does the
+whole thing (this mirrors Genomed-mtproto's `mtg kaskad`): it generates the RU
+key, SSHes into EU (key or password), stands up a **forward-only** WireGuard exit
+there (EU makes its own private key locally — it never leaves the box; only the
+RU peer IP is allowed; NAT-only, no shell), wires both sides, brings the RU
+interface up, and healthchecks through the tunnel.
 
 ```bash
-wg-quick up wg-cascade
-vlr cascade test       # PASS if there is a fresh WireGuard handshake
+# key auth
+vlr cascade up --eu-host 5.6.7.8 --eu-user root --eu-key ~/.ssh/id_ed25519
+
+# or password auth (needs sshpass on the RU node)
+vlr cascade up --eu-host 5.6.7.8 --eu-user root --eu-pass 'secret'
 ```
+
+Useful flags: `--wg-port 51820`, `--wan eth0` (EU NIC; empty = auto-detect),
+`--iface wg-cascade`, `--ru-ip 10.66.0.2`, `--eu-ip 10.66.0.1`, `--no-check`.
+
+Output ends with the reachability table:
+
+```
+==> проверка через каскад:
+telegram.org            [OK]
+amazon.com              [OK]
+claude.ai               [OK]
+openai.com              [OK]
+notebooklm.google.com   [OK]
+google.com              [OK]
+
+✓ каскад RU→EU работает
+```
+
+Re-run the check any time:
+
+```bash
+vlr cascade check                              # built-in site list
+vlr cascade check --sites ya.ru,github.com     # custom
+vlr cascade test                               # just the WireGuard handshake
+```
+
+### Manual / advanced fallback
+
+If you want to configure the two sides by hand (e.g. EU has no SSH from RU), the
+old two-step still exists: `vlr cascade gen` prints the RU config, and
+`vlr cascade exit --entry-pubkey <RU_PUB> --wan eth0` prints the EU config. The
+automated `vlr cascade up` is the recommended path.
 
 ## `cascade` config block
 

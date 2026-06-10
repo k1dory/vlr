@@ -60,6 +60,17 @@ daemon,cascade,config,util}` · `deploy/` · `docs/`.
 - Real `StatsPoller` against Xray StatsService gRPC (currently `cascade.NoopStats`).
 - Heartbeat bearer verification on the main (`handleHeartbeat` TODO).
 - PostgreSQL persistence on main (currently in-memory `detail` map).
-- `vlr up/down` that actually exec wg-quick + restart Xray (currently `render` +
-  `cascade gen` emit configs for the operator/systemd to apply).
+- `vlr up/down` that also renders Xray + restarts it (the cascade is already
+  automated: `vlr cascade up` provisions the EU exit over SSH and brings WG up;
+  Xray render/restart is still manual via `vlr render`).
 - TG bot + web subscription frontend (per White_Rabbit design system).
+
+## Cascade automation (vlr cascade up)
+
+`vlr cascade up --eu-host <ip> --eu-key|--eu-pass` runs from the RU node and
+provisions the EU exit over system SSH (sshpass for passwords) — no Go SSH dep.
+EU generates its own WG private key locally (never leaves the box), accepts only
+the RU peer IP, NAT-only (forward-only, the WG analogue of mtg's restricted SSH
+key). Ends with a curl-through-`--interface wg-cascade` `[OK]/[FAIL]` healthcheck
+(`internal/cascade/provision.go`; `BuildExitScript`/`FormatResults` are unit-tested).
+`vlr cascade check` re-runs the site probe; `vlr cascade test` checks the handshake.

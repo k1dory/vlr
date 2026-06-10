@@ -45,6 +45,20 @@ func GenerateKeyPair() (KeyPair, error) {
 	}, nil
 }
 
+// PublicFromPrivate re-derives the WireGuard public key from a stored private
+// key, so `cascade up` can reuse an existing RU key instead of rotating it.
+func PublicFromPrivate(privB64 string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(privB64)
+	if err != nil {
+		return "", fmt.Errorf("decode wg private key: %w", err)
+	}
+	priv, err := ecdh.X25519().NewPrivateKey(raw)
+	if err != nil {
+		return "", fmt.Errorf("parse wg private key: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(priv.PublicKey().Bytes()), nil
+}
+
 // RenderEntry renders the wg-quick config for the RU entry node. PostUp/PostDown
 // add a policy route so only client-egress traffic uses the tunnel, leaving the
 // node's own management traffic (SSH, heartbeat to main) on the default route.

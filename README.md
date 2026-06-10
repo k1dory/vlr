@@ -37,9 +37,10 @@ One binary, three roles (chosen by the config file):
 ./install.sh                  # build + install global `vlr` + systemd unit
 
 vlr init --role standalone --node-id ru-yc-msk-01   # public IP auto-detected
-vlr cascade gen > /etc/wireguard/wg-cascade.conf   # RU side
-# (on the EU box) vlr cascade exit --entry-pubkey <RU_WG_PUB> --wan eth0
-wg-quick up wg-cascade
+
+# bring up the RU->EU cascade in one command (provisions the EU exit over SSH):
+vlr cascade up --eu-host 5.6.7.8 --eu-user root --eu-key ~/.ssh/id_ed25519
+# ends with a [OK]/[FAIL] reachability table through the tunnel
 
 vlr user add --email you@example.com --telegram-id 123456789   # prints a vless:// share link
 vlr user link --email you@example.com  # share link + base64 subscription

@@ -51,15 +51,34 @@ echo "==> installing systemd unit (if systemd present)"
 if command -v systemctl >/dev/null 2>&1; then
   sudo cp deploy/systemd/vlr.service /etc/systemd/system/vlr.service
   sudo systemctl daemon-reload
-  echo "    enable with: systemctl enable --now vlr"
 fi
 
 echo
-echo "vlr installed: $(command -v vlr)"
-vlr version
-echo
-echo "next:"
-echo "  vlr init --role standalone --node-id ru-yc-msk-01   # public IP auto-detected"
-echo "  vlr cascade gen                                     # RU->EU WireGuard config"
-echo "  vlr user add --email you@example.com --telegram-id <ID>   # prints share link"
-echo "  systemctl enable --now vlr                          # run the node daemon"
+echo "vlr установлен: $(command -v vlr)  ($(vlr version))"
+
+CONFIG="/etc/vlr/config.json"
+
+# Interactive provisioning: show the mode menu, create the config, enable the
+# service. Only on a real terminal — in a pipe/CI we just print the next step.
+if [ -t 0 ] && [ -t 1 ]; then
+  if [ -f "$CONFIG" ]; then
+    echo "конфиг уже есть: $CONFIG  (перенастроить: vlr init)"
+  else
+    sudo "$BIN" init --config "$CONFIG" || {
+      echo "настройка прервана — запусти позже: sudo vlr init"
+      exit 0
+    }
+  fi
+  if [ -f "$CONFIG" ] && command -v systemctl >/dev/null 2>&1; then
+    echo "==> включаю и запускаю сервис vlr"
+    sudo systemctl enable --now vlr
+    sleep 1
+    sudo systemctl --no-pager --full status vlr | head -n 6 || true
+  fi
+  echo
+  echo "Готово. Дальше — каскад RU→EU (одной командой с этой ноды) и Xray:"
+  echo "  vlr cascade up --eu-host <EU_IP> --eu-user root --eu-key ~/.ssh/id_ed25519"
+  echo "  vlr render > /usr/local/etc/xray/config.json && systemctl restart xray"
+else
+  echo "next: sudo vlr init    # интерактивное меню режимов (1/2/3), затем: systemctl enable --now vlr"
+fi
