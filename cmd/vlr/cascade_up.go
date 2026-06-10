@@ -40,7 +40,7 @@ func cmdCascadeUp(args []string) error {
 
 	// Interactive: no EU host on a terminal => ask for everything.
 	if *euHost == "" && isInteractive() {
-		cascadeUpWizard(euHost, euUser, euKey, euPass, exitName, exitCountry)
+		cascadeUpWizard(euHost, euUser, euPort, euKey, euPass, exitName, exitCountry)
 	}
 	if *euHost == "" {
 		return fmt.Errorf("--eu-host is required (or run `vlr cascade up` on a terminal)")
@@ -66,6 +66,16 @@ func cmdCascadeUp(args []string) error {
 		}
 		c.Cascade.PrivateKey = kp.PrivateKey
 		ruPub = kp.PublicKey
+	}
+
+	// Password auth needs sshpass — install it automatically on this RU node
+	// instead of failing with an instruction.
+	installedSshpass := false
+	if *euPass != "" {
+		var serr error
+		if installedSshpass, serr = ensureSshpass(context.Background()); serr != nil {
+			return serr
+		}
 	}
 
 	// 2. Provision the EU exit over SSH; capture its public key.
@@ -132,6 +142,9 @@ func cmdCascadeUp(args []string) error {
 	// Record what we just created so `vlr uninstall` can reverse it. The EU exit
 	// stores host/user/port/key for remote teardown — never the password.
 	lp := ledger.DefaultPath(filepath.Dir(savePath))
+	if installedSshpass {
+		_ = ledger.Record(lp, ledger.KindPackage, "sshpass", nil)
+	}
 	_ = ledger.Record(lp, ledger.KindFile, wgPath, nil)
 	_ = ledger.Record(lp, ledger.KindWGIface, *iface, nil)
 	_ = ledger.Record(lp, ledger.KindEUExit, *euHost, map[string]string{
@@ -166,8 +179,48 @@ func cmdCascadeUp(args []string) error {
 	return nil
 }
 
+// ensureSshpass makes sure sshpass is available for password SSH auth, installing
+// it via the node's package manager if missing. Returns whether it installed it
+// (so uninstall can remove it). Runs as root on the RU node, so no sudo.
+func ensureSshpass(ctx context.Context) (installed bool, err error) {
+	if _, e := exec.LookPath("sshpass"); e == nil {
+		return false, nil
+	}
+	fmt.Println("==> ставлю sshpass (нужен для входа по паролю)")
+	type pm struct {
+		bin     string
+		install []string
+		update  []string
+	}
+	managers := []pm{
+		{"apt-get", []string{"install", "-y", "sshpass"}, []string{"update", "-qq"}},
+		{"apk", []string{"add", "sshpass"}, nil},
+		{"dnf", []string{"install", "-y", "sshpass"}, nil},
+		{"yum", []string{"install", "-y", "sshpass"}, nil},
+	}
+	for _, m := range managers {
+		if _, e := exec.LookPath(m.bin); e != nil {
+			continue
+		}
+		run := func(args []string) error {
+			c := exec.CommandContext(ctx, m.bin, args...)
+			c.Stdout, c.Stderr = os.Stdout, os.Stderr
+			c.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+			return c.Run()
+		}
+		if run(m.install) != nil && m.update != nil {
+			_ = run(m.update) // stale package lists -> refresh and retry once
+			_ = run(m.install)
+		}
+		if _, e := exec.LookPath("sshpass"); e == nil {
+			return true, nil
+		}
+	}
+	return false, fmt.Errorf("не смог поставить sshpass — поставь вручную (apt-get install -y sshpass) или используй --eu-key")
+}
+
 // cascadeUpWizard interactively fills the EU exit parameters.
-func cascadeUpWizard(euHost, euUser, euKey, euPass, exitName, exitCountry *string) {
+func cascadeUpWizard(euHost, euUser *string, euPort *int, euKey, euPass, exitName, exitCountry *string) {
 	fmt.Print(`
 ========================================
    vlr — поднять каскад RU→EU
@@ -179,6 +232,12 @@ EU-выход будет настроен автоматически по SSH (f
 		*euHost = ask("IP EU-выхода", "")
 	}
 	*euUser = ask("SSH-пользователь", "root")
+	if p := ask("SSH-порт", "22"); p != "" {
+		var n int
+		if _, err := fmt.Sscanf(p, "%d", &n); err == nil && n > 0 {
+			*euPort = n
+		}
+	}
 
 	switch ask("Доступ: 1) по ключу  2) по паролю", "1") {
 	case "2":

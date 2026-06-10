@@ -6,33 +6,56 @@ set -euo pipefail
 PREFIX="${PREFIX:-/usr/local}"
 BIN="$PREFIX/bin/vlr"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GO_VER="${GO_VER:-1.25.1}"
 
-# Ensure a recent Go toolchain. Fresh RU/EU nodes ship without Go, and the distro
-# package is usually too old for go.mod's `go 1.25`. Install the official binary
-# (set VLR_AUTO_GO=0 to disable and just print instructions instead).
+# A Go installed to /usr/local/go is only on PATH via /etc/profile.d/go.sh, which
+# applies to future login shells — not to this script or a re-run in the same
+# session. Add it here so an already-installed Go is actually found (the reason
+# install.sh kept reinstalling Go every run).
+export PATH="$PATH:/usr/local/go/bin"
+
+# have_go_125 succeeds if a Go >= 1.25 (go.mod's minimum) is on PATH.
+have_go_125() {
+  command -v go >/dev/null 2>&1 || return 1
+  local ver major minor
+  ver="$(go version | awk '{print $3}' | sed 's/^go//')"   # e.g. 1.25.4
+  major="${ver%%.*}"; minor="${ver#*.}"; minor="${minor%%.*}"
+  [ "${major:-0}" -gt 1 ] 2>/dev/null && return 0
+  [ "${major:-0}" -eq 1 ] 2>/dev/null && [ "${minor:-0}" -ge 25 ] 2>/dev/null && return 0
+  return 1
+}
+
+# Ensure a recent Go toolchain. Fresh RU/EU nodes ship without Go (or too old for
+# go.mod's `go 1.25`). Installs the LATEST official release (override with
+# GO_VER=1.25.4; VLR_AUTO_GO=0 disables and just prints instructions).
 ensure_go() {
-  if command -v go >/dev/null 2>&1; then
+  if have_go_125; then
+    echo "==> Go уже есть: $(go version)"
     return 0
   fi
   case "$(uname -m)" in
     x86_64|amd64)  goarch=amd64;;
     aarch64|arm64) goarch=arm64;;
-    *) echo "unknown arch $(uname -m); install Go ${GO_VER} manually"; exit 1;;
+    *) echo "unknown arch $(uname -m); install Go manually"; exit 1;;
   esac
+  # Latest version from go.dev (e.g. "go1.25.4" -> "1.25.4"); fall back if offline.
+  local ver="${GO_VER:-}"
+  if [ -z "$ver" ]; then
+    ver="$(curl -fsSL https://go.dev/VERSION?m=text 2>/dev/null | head -1 | sed 's/^go//')"
+    [ -n "$ver" ] || ver="1.25.4"
+  fi
   if [ "${VLR_AUTO_GO:-1}" != "1" ]; then
     echo "go not found. Install it:"
-    echo "  curl -fsSL https://go.dev/dl/go${GO_VER}.linux-${goarch}.tar.gz -o /tmp/go.tgz"
+    echo "  curl -fsSL https://go.dev/dl/go${ver}.linux-${goarch}.tar.gz -o /tmp/go.tgz"
     echo "  sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf /tmp/go.tgz"
     echo "  export PATH=\$PATH:/usr/local/go/bin"
     exit 1
   fi
-  echo "==> go not found; installing Go ${GO_VER} (${goarch})"
-  curl -fsSL "https://go.dev/dl/go${GO_VER}.linux-${goarch}.tar.gz" -o /tmp/go.tgz
+  echo "==> Go не найден (или старый); ставлю Go ${ver} (${goarch})"
+  curl -fsSL "https://go.dev/dl/go${ver}.linux-${goarch}.tar.gz" -o /tmp/go.tgz
   sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf /tmp/go.tgz
   echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh >/dev/null
   export PATH="$PATH:/usr/local/go/bin"
-  command -v go >/dev/null 2>&1 || { echo "Go install failed"; exit 1; }
+  have_go_125 || { echo "Go install failed"; exit 1; }
   GO_INSTALLED_BY_VLR=1   # so `vlr uninstall --remove-go` knows it may remove it
 }
 
