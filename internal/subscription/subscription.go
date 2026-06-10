@@ -40,10 +40,7 @@ func Link(entry config.EntryConfig, u store.User) string {
 	}
 	q.Set("spx", "/")
 
-	label := u.Email
-	if label == "" {
-		label = u.UUID
-	}
+	label := userLabel(u)
 
 	return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
 		u.UUID,
@@ -52,6 +49,24 @@ func Link(entry config.EntryConfig, u store.User) string {
 		q.Encode(),
 		url.PathEscape(label),
 	)
+}
+
+// userLabel picks a human tag for the share link: email, else tg:<id>, else the
+// external id, else a short uuid. Never empty.
+func userLabel(u store.User) string {
+	switch {
+	case u.Email != "":
+		return u.Email
+	case u.TelegramID != 0:
+		return fmt.Sprintf("tg%d", u.TelegramID)
+	case u.ExternalID != "":
+		return u.ExternalID
+	default:
+		if len(u.UUID) >= 8 {
+			return u.UUID[:8]
+		}
+		return u.UUID
+	}
 }
 
 // Stream builds the base64 subscription body for a set of users on one entry.

@@ -66,6 +66,8 @@ func (s *Standalone) Run(ctx context.Context) error {
 			"users":      len(s.store.Users()),
 		})
 	})
+	// Token-guarded user API (POST/DELETE /v1/users) — prod automation.
+	registerUserAPI(mux, s.cfg, s.store, s.log)
 
 	srv := &http.Server{Addr: subListen(s.cfg), Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go s.monitorLoop(ctx)

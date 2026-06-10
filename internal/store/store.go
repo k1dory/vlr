@@ -17,9 +17,10 @@ import (
 
 // User is one VPN client provisioned on a node.
 type User struct {
-	UUID       string    `json:"uuid"`        // VLESS id
-	Email      string    `json:"email"`       // label / accounting key
-	TelegramID int64     `json:"telegram_id"` // owner's Telegram user id (0 = unset)
+	UUID       string    `json:"uuid"`        // VLESS id — the stable identity
+	Email      string    `json:"email"`       // optional label
+	TelegramID int64     `json:"telegram_id"` // optional owner's Telegram user id
+	ExternalID string    `json:"external_id"` // optional external/system id
 	ShortID    string    `json:"short_id"`    // Reality short id handed to this user
 	Profile    string    `json:"profile"`     // "mobile" | "desktop" (decides flow)
 	CreatedAt  time.Time `json:"created_at"`
@@ -79,13 +80,17 @@ func (s *Store) flushLocked() error {
 	return os.Rename(tmp, s.path)
 }
 
-// AddUser inserts a user and bumps ConfigVersion.
+// AddUser inserts a user and bumps ConfigVersion. Identity is the UUID (always
+// present); email/telegram are optional labels. Duplicate check is only applied
+// to a NON-EMPTY email — empty fields never cause a failure.
 func (s *Store) AddUser(u User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, e := range s.st.Users {
-		if e.Email == u.Email {
-			return fmt.Errorf("user %q already exists", u.Email)
+	if u.Email != "" {
+		for _, e := range s.st.Users {
+			if e.Email == u.Email {
+				return fmt.Errorf("user with email %q already exists", u.Email)
+			}
 		}
 	}
 	if u.CreatedAt.IsZero() {
@@ -97,21 +102,44 @@ func (s *Store) AddUser(u User) error {
 	return s.flushLocked()
 }
 
-// RemoveUser deletes a user by email and bumps ConfigVersion.
-func (s *Store) RemoveUser(email string) error {
+// matchRef reports whether u is identified by ref (uuid, email, external id, or
+// telegram id as a string). Empty fields never match an empty ref.
+func matchRef(u User, ref string) bool {
+	if ref == "" {
+		return false
+	}
+	return u.UUID == ref || (u.Email != "" && u.Email == ref) ||
+		(u.ExternalID != "" && u.ExternalID == ref) ||
+		(u.TelegramID != 0 && fmt.Sprintf("%d", u.TelegramID) == ref)
+}
+
+// FindUser returns the user matching ref (uuid/email/external-id/telegram-id).
+func (s *Store) FindUser(ref string) (User, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, u := range s.st.Users {
+		if matchRef(u, ref) {
+			return u, true
+		}
+	}
+	return User{}, false
+}
+
+// RemoveUser deletes the user matching ref and bumps ConfigVersion.
+func (s *Store) RemoveUser(ref string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := s.st.Users[:0]
 	found := false
 	for _, e := range s.st.Users {
-		if e.Email == email {
+		if !found && matchRef(e, ref) {
 			found = true
 			continue
 		}
 		out = append(out, e)
 	}
 	if !found {
-		return fmt.Errorf("user %q not found", email)
+		return fmt.Errorf("user %q not found", ref)
 	}
 	s.st.Users = out
 	s.st.ConfigVersion++

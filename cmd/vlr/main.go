@@ -61,6 +61,8 @@ func main() {
 		err = cmdNode(args)
 	case "split":
 		err = cmdSplit(args)
+	case "up":
+		err = cmdUp(args)
 	case "render":
 		err = cmdRender(args)
 	case "serve":
@@ -96,9 +98,10 @@ COMMANDS
   init        guided setup wizard (run with no flags) or --role standalone|child|main
   keys        generate Reality / WireGuard keys (--type reality|wireguard)
   cascade     gen|exit|test the RU->EU WireGuard hop
-  user        add|rm|list|link  (--email, --telegram-id, --profile mobile|desktop)
+  user        add|rm|list|link  (all fields optional; auto-applies Xray)
   split       add|rm|list  RU-direct domains (split-tunnel: egress from RU, not EU)
   node        register|list (main role)
+  up          install/refresh Xray + apply config (one-shot data-plane bring-up)
   render      print the Xray config
   serve       run the node daemon for this node's role
   status      show node status
@@ -228,6 +231,12 @@ func cmdInit(args []string) error {
 			seed = append(seed, ownDomain)
 		}
 		c.Split = config.SplitConfig{RUDirect: dedupNonEmpty(seed)}
+		// Xray auto-apply target + an API token for the secured /v1/users endpoint,
+		// so the node is API-ready straight after init.
+		c.Xray = config.XrayConfig{ConfigPath: "/usr/local/etc/xray/config.json"}
+		if tok, terr := util.RandHex(24); terr == nil {
+			c.APIToken = tok
+		}
 		if config.Role(*role) == config.RoleChild {
 			c.Child = config.ChildConfig{
 				MainURL: *mainURL, Token: *token, PullBearer: *pullBearer,
@@ -254,10 +263,15 @@ func cmdInit(args []string) error {
 		fmt.Printf("  reality pubkey:   %s\n", c.Entry.PublicKey)
 		fmt.Printf("  reality SNI:      %s\n", c.Entry.SNI)
 		fmt.Printf("  fingerprint:      %s\n", c.Entry.Fingerprint)
+		if c.APIToken != "" {
+			fmt.Printf("  API-токен:        %s\n", c.APIToken)
+			fmt.Println("  создать юзера по API:")
+			fmt.Printf("    curl -fsS -XPOST http://127.0.0.1:9777/v1/users -H 'Authorization: Bearer %s' -d '{\"telegram_id\":9876567}'\n", c.APIToken)
+		}
 		fmt.Println("\nдальше:")
 		fmt.Println("  vlr cascade up --eu-host <IP> --eu-user root --eu-key ~/.ssh/id_ed25519   # каскад RU→EU одной командой")
-		fmt.Println("  vlr user add --email you@example.com --telegram-id <ID>")
-		fmt.Println("  vlr render > /usr/local/etc/xray/config.json && systemctl restart xray")
+		fmt.Println("  vlr user add                       # без полей: создаст юзера, сам обновит Xray")
+		fmt.Println("  vlr user add --telegram-id 12345   # или с tg-id для трекинга")
 	}
 	if c.Role == config.RoleMain {
 		fmt.Println("\nдальше:")
@@ -374,9 +388,12 @@ func cmdUser(args []string) error {
 	sub, rest := args[0], args[1:]
 	fs := newFlagSet("user")
 	cfgPath := fs.String("config", "", "config path")
-	email := fs.String("email", "", "user email / label")
+	email := fs.String("email", "", "optional email label")
+	extID := fs.String("id", "", "optional external/system id")
 	profile := fs.String("profile", "mobile", "mobile|desktop (desktop skips Vision)")
-	tgID := fs.Int64("telegram-id", 0, "owner's Telegram user id")
+	tgID := fs.Int64("telegram-id", 0, "optional Telegram user id")
+	ref := fs.String("ref", "", "rm/link: user ref (uuid|email|id|telegram-id)")
+	noApply := fs.Bool("no-apply", false, "do not auto-render+reload Xray")
 	_ = fs.Parse(rest)
 
 	c, err := loadCfg(*cfgPath)
@@ -387,58 +404,92 @@ func cmdUser(args []string) error {
 	if err != nil {
 		return err
 	}
+	// positional ref for rm/link: `vlr user rm <ref>`
+	if *ref == "" && len(fs.Args()) > 0 {
+		*ref = fs.Args()[0]
+	}
 
 	switch sub {
 	case "add":
-		if *email == "" {
-			return fmt.Errorf("--email is required")
-		}
-		uuid, err := util.NewUUID()
+		u, err := addUser(c, st, *email, *extID, *tgID, *profile)
 		if err != nil {
 			return err
 		}
-		sid := c.Entry.ShortIDs[0]
-		if len(c.Entry.ShortIDs) > 1 {
-			// spread users across short ids round-robin by count
-			sid = c.Entry.ShortIDs[len(st.Users())%len(c.Entry.ShortIDs)]
-		}
-		u := store.User{UUID: uuid, Email: *email, TelegramID: *tgID, ShortID: sid, Profile: *profile}
-		if err := st.AddUser(u); err != nil {
-			return err
-		}
+		applyXray(c, st, *noApply)
 		fmt.Println(subscription.Link(c.Entry, u))
 		return nil
 	case "rm":
-		if *email == "" {
-			return fmt.Errorf("--email is required")
+		if *ref == "" {
+			return fmt.Errorf("укажи ref: vlr user rm <uuid|email|id|telegram-id>")
 		}
-		if err := st.RemoveUser(*email); err != nil {
+		if err := st.RemoveUser(*ref); err != nil {
 			return err
 		}
-		fmt.Println("removed", *email)
+		applyXray(c, st, *noApply)
+		fmt.Println("removed", *ref)
 		return nil
 	case "list":
 		for _, u := range st.Users() {
-			fmt.Printf("%-30s %s tg=%d profile=%s rx=%d tx=%d\n", u.Email, u.UUID, u.TelegramID, u.Profile, u.RxBytes, u.TxBytes)
+			fmt.Printf("%-12s tg=%-12d id=%-10s %s profile=%s rx=%d tx=%d\n",
+				orDash(u.Email), u.TelegramID, orDash(u.ExternalID), u.UUID, u.Profile, u.RxBytes, u.TxBytes)
 		}
 		return nil
 	case "link":
-		if *email == "" {
-			return fmt.Errorf("--email is required")
+		if *ref == "" {
+			return fmt.Errorf("укажи ref: vlr user link <uuid|email|id|telegram-id>")
 		}
-		for _, u := range st.Users() {
-			if u.Email == *email {
-				fmt.Println("# share link:")
-				fmt.Println(subscription.Link(c.Entry, u))
-				fmt.Println("# base64 subscription:")
-				fmt.Println(subscription.Stream(c.Entry, []store.User{u}))
-				return nil
-			}
+		u, ok := st.FindUser(*ref)
+		if !ok {
+			return fmt.Errorf("user %q not found", *ref)
 		}
-		return fmt.Errorf("user %q not found", *email)
+		fmt.Println("# share link:")
+		fmt.Println(subscription.Link(c.Entry, u))
+		fmt.Println("# base64 subscription:")
+		fmt.Println(subscription.Stream(c.Entry, []store.User{u}))
+		return nil
 	default:
 		return fmt.Errorf("unknown user subcommand %q", sub)
 	}
+}
+
+// addUser builds and stores a user from optional fields. Nothing is required —
+// a UUID is always generated, and empty email/telegram/id are fine.
+func addUser(c *config.Config, st *store.Store, email, extID string, tgID int64, profile string) (store.User, error) {
+	uuid, err := util.NewUUID()
+	if err != nil {
+		return store.User{}, err
+	}
+	if profile == "" {
+		profile = "mobile"
+	}
+	sid := ""
+	if len(c.Entry.ShortIDs) > 0 {
+		sid = c.Entry.ShortIDs[len(st.Users())%len(c.Entry.ShortIDs)]
+	}
+	u := store.User{UUID: uuid, Email: email, ExternalID: extID, TelegramID: tgID, ShortID: sid, Profile: profile}
+	if err := st.AddUser(u); err != nil {
+		return store.User{}, err
+	}
+	return u, nil
+}
+
+// applyXray re-renders and reloads Xray after a user change (best-effort).
+func applyXray(c *config.Config, st *store.Store, skip bool) {
+	if skip {
+		return
+	}
+	if err := xray.Apply(c, st.Users()); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ авто-применение Xray не удалось: %v\n", err)
+	} else if c.Xray.ConfigPath != "" {
+		fmt.Println("✓ Xray обновлён:", c.Xray.ConfigPath)
+	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // --- node (main role) ------------------------------------------------------

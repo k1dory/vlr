@@ -46,6 +46,8 @@ func (c *Child) Run(ctx context.Context) error {
 		up, _ := c.mon.Healthy(r.Context())
 		writeJSON(w, http.StatusOK, map[string]any{"cascade_up": up})
 	})
+	// Token-guarded user API (POST/DELETE /v1/users) — prod automation.
+	registerUserAPI(mux, c.cfg, c.store, c.log)
 
 	addr := c.cfg.Child.PullListen
 	if addr == "" {

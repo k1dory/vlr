@@ -37,9 +37,34 @@ config version). Called only when `protocol.ShouldPull` fires.
 ### `GET /healthz`
 `200 {"cascade_up": <bool>}`.
 
-## Standalone node (`role: standalone`)
+## Node user API (`role: standalone` or `child`)
 
-### `GET /sub/<email>`
+Token-guarded by `Authorization: Bearer <api_token>` (the `api_token` generated
+by `vlr init`; empty token disables these endpoints). This is the prod automation
+surface — every field is optional, and creating a user auto-renders + reloads Xray.
+
+### `POST /v1/users`
+Create a user. Body (all optional): `{"telegram_id":9876567,"id":"cust-42","email":"","profile":"mobile"}`
+— or even `{}`. Returns:
+```json
+{ "uuid":"...", "link":"vless://...#tg9876567", "subscription":"<base64>" }
+```
+```bash
+curl -fsS -XPOST https://node1.example.com/v1/users \
+  -H "Authorization: Bearer $TOKEN" -d '{"telegram_id":9876567}'
+```
+
+### `DELETE /v1/users/<ref>`
+Delete by `uuid|email|id|telegram-id`. Auto-applies Xray.
+
+### `GET /v1/users`
+List users (token-guarded).
+
+> Bind/expose: the node serves these on `child.pull_listen` (default
+> `127.0.0.1:9777`). For public prod use, front it with TLS (the Reality :443 SNI
+> router or a reverse proxy) — do not expose `:9777` raw.
+
+### `GET /sub/<ref>`
 Returns the **base64 subscription** for that user (import URL for
 v2rayNG/Hiddify/NekoBox). Sets a `Profile-Title` header.
 

@@ -96,6 +96,11 @@ func cmdCascadeUp(args []string) error {
 			RUPublicKey: ruPub, RUTunnelIP: *ruIP,
 		})
 	if err != nil {
+		// Common case: EU was reinstalled, so its SSH host key changed and
+		// StrictHostKeyChecking refuses it. Give the exact fix.
+		if msg := err.Error(); strings.Contains(msg, "IDENTIFICATION HAS CHANGED") || strings.Contains(msg, "Host key verification failed") {
+			fmt.Printf("\n⚠ SSH-ключ хоста EU сменился (EU переустановлен?). Сбрось его и повтори:\n   ssh-keygen -R %s\n   vlr cascade up\n\n", *euHost)
+		}
 		return err
 	}
 	fmt.Printf("    EU pubkey: %s\n", euPub)
