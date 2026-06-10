@@ -20,6 +20,13 @@ import (
 	"path/filepath"
 )
 
+// CascadeFwmark is the SO_MARK / WireGuard fwmark that means "bypass the RU->EU
+// tunnel and egress directly from the RU node". The WG interface marks its own
+// encapsulated packets with it, and the policy rule `ip rule not fwmark <this>
+// table <this>` sends only UNmarked traffic into the tunnel. Xray's split-tunnel
+// `egress-ru` outbound sets this mark so its connections exit RU directly.
+const CascadeFwmark = 51820
+
 // Role is the node's operating mode.
 type Role string
 
@@ -54,8 +61,23 @@ type Config struct {
 
 	Entry   EntryConfig   `json:"entry"`   // client-facing Reality inbound (RU)
 	Cascade CascadeConfig `json:"cascade"` // RU->EU WireGuard hop
+	Split   SplitConfig   `json:"split"`   // domains that egress directly from RU
 	Child   ChildConfig   `json:"child"`   // set when Role==child
 	Main    MainConfig    `json:"main"`    // set when Role==main
+}
+
+// SplitConfig controls split-tunneling. By default every client connection
+// cascades RU->EU. Domains listed here egress DIRECTLY from the RU node instead
+// (no cascade) — for "our" service domains and RU services that need a RU IP or
+// would be slower/geo-blocked via EU.
+type SplitConfig struct {
+	// RUDirect: domain matchers sent direct from RU. A bare host like
+	// "sberbank.ru" is treated as Xray "domain:sberbank.ru" (host + subdomains);
+	// you may also pass explicit Xray forms ("full:host", "domain:x", "regexp:…").
+	RUDirect []string `json:"ru_direct"`
+	// GeositeRU: Xray geosite groups sent direct (needs geosite.dat on the node),
+	// e.g. "category-ru", "ru". Optional.
+	GeositeRU []string `json:"geosite_ru"`
 }
 
 // EntryConfig is the public VLESS+Reality inbound that clients connect to.
@@ -82,6 +104,10 @@ type EntryConfig struct {
 // datacenter, where camouflage buys nothing and pure speed wins.
 type CascadeConfig struct {
 	Enabled bool `json:"enabled"`
+
+	// Human labels for the EU exit (asked interactively by `vlr cascade up`).
+	ExitName    string `json:"exit_name"`    // e.g. eu-aeza-de
+	ExitCountry string `json:"exit_country"` // e.g. DE, NL, FI
 
 	// Interface on the entry (RU) side.
 	Interface     string `json:"interface"`       // e.g. wg-cascade

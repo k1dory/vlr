@@ -18,10 +18,61 @@ package xray
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/k1dory/vlr/internal/config"
 	"github.com/k1dory/vlr/internal/store"
 )
+
+// buildRoutingRules assembles the Xray routing table: stats API, then the
+// split-tunnel RU-direct rule (domains/geosite -> egress-ru, leave RU directly),
+// then a private-range blackhole so a client can't reach the EU exit's LAN. Any
+// traffic matching no rule falls to the first outbound (egress -> EU).
+func buildRoutingRules(c *config.Config) []any {
+	rules := []any{
+		map[string]any{
+			"type":        "field",
+			"inboundTag":  []string{"api-in"},
+			"outboundTag": "api",
+		},
+	}
+
+	var ruMatch []string
+	for _, d := range c.Split.RUDirect {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		// Bare host -> "domain:host" (matches host and its subdomains). Explicit
+		// Xray matchers (full:, domain:, regexp:, geosite:) are passed through.
+		if strings.Contains(d, ":") {
+			ruMatch = append(ruMatch, d)
+		} else {
+			ruMatch = append(ruMatch, "domain:"+d)
+		}
+	}
+	for _, g := range c.Split.GeositeRU {
+		if g = strings.TrimSpace(g); g != "" {
+			ruMatch = append(ruMatch, "geosite:"+g)
+		}
+	}
+	if len(ruMatch) > 0 {
+		rules = append(rules, map[string]any{
+			"type":        "field",
+			"domain":      ruMatch,
+			"outboundTag": "egress-ru",
+		})
+	}
+
+	// Drop private ranges so a compromised client can't pivot into the EU exit's
+	// internal network through the tunnel.
+	rules = append(rules, map[string]any{
+		"type":        "field",
+		"ip":          []string{"geoip:private"},
+		"outboundTag": "block",
+	})
+	return rules
+}
 
 // Render returns the Xray config JSON for the given node config + user list.
 func Render(c *config.Config, users []store.User) ([]byte, error) {
@@ -102,12 +153,23 @@ func Render(c *config.Config, users []store.User) ([]byte, error) {
 			},
 		},
 		"outbounds": []any{
-			// All client egress leaves through freedom. The host's routing table
-			// (set up by `vlr up` / wg-quick) sends this out via wg-cascade to EU.
+			// DEFAULT egress: unmarked freedom. The host routing table (wg-cascade
+			// PostUp) sends unmarked traffic into the tunnel -> EU exit.
 			map[string]any{
 				"tag":      "egress",
 				"protocol": "freedom",
 				"settings": map[string]any{"domainStrategy": "UseIPv4"},
+			},
+			// SPLIT-TUNNEL egress: freedom marked with the cascade fwmark, so the
+			// `ip rule not fwmark` policy lets it bypass the tunnel and leave
+			// directly from the RU node. Used for the RU-direct domain list.
+			map[string]any{
+				"tag":      "egress-ru",
+				"protocol": "freedom",
+				"settings": map[string]any{"domainStrategy": "UseIPv4"},
+				"streamSettings": map[string]any{
+					"sockopt": map[string]any{"mark": config.CascadeFwmark},
+				},
 			},
 			map[string]any{
 				"tag":      "block",
@@ -115,20 +177,7 @@ func Render(c *config.Config, users []store.User) ([]byte, error) {
 			},
 		},
 		"routing": map[string]any{
-			"rules": []any{
-				map[string]any{
-					"type":        "field",
-					"inboundTag":  []string{"api-in"},
-					"outboundTag": "api",
-				},
-				// Drop private ranges so a compromised client can't pivot into
-				// the EU exit's internal network through the tunnel.
-				map[string]any{
-					"type":        "field",
-					"ip":          []string{"geoip:private"},
-					"outboundTag": "block",
-				},
-			},
+			"rules": buildRoutingRules(c),
 		},
 	}
 

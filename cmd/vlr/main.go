@@ -58,6 +58,8 @@ func main() {
 		err = cmdUser(args)
 	case "node":
 		err = cmdNode(args)
+	case "split":
+		err = cmdSplit(args)
 	case "render":
 		err = cmdRender(args)
 	case "serve":
@@ -90,6 +92,7 @@ COMMANDS
   keys        generate Reality / WireGuard keys (--type reality|wireguard)
   cascade     gen|exit|test the RU->EU WireGuard hop
   user        add|rm|list|link  (--email, --telegram-id, --profile mobile|desktop)
+  split       add|rm|list  RU-direct domains (split-tunnel: egress from RU, not EU)
   node        register|list (main role)
   render      print the Xray config
   serve       run the node daemon for this node's role
@@ -159,6 +162,14 @@ func cmdInit(args []string) error {
 			PullThreshold: 256 << 20, ReconcileSeconds: 600,
 		}
 	case config.RoleStandalone, config.RoleChild:
+		// .env: OWN_DOMAIN (attached domain) and DOMAIN_FOR_TLS (Fake-TLS SNIs).
+		env := util.LoadDotEnv(util.DotEnvCandidates()...)
+		ownDomain := env["OWN_DOMAIN"]
+
+		if *host == "" && ownDomain != "" {
+			*host = ownDomain // attached domain is the public address clients dial
+			fmt.Printf("host из OWN_DOMAIN: %s\n", ownDomain)
+		}
 		if *host == "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 			ip, err := util.DetectPublicIP(ctx)
@@ -167,7 +178,7 @@ func cmdInit(args []string) error {
 				return fmt.Errorf("auto-detect host failed, pass --host explicitly: %w", err)
 			}
 			*host = ip
-			fmt.Printf("detected public host: %s\n", ip)
+			fmt.Printf("определён публичный host: %s\n", ip)
 		}
 		kp, err := reality.GenerateKeyPair()
 		if err != nil {
@@ -177,7 +188,17 @@ func cmdInit(args []string) error {
 		if err != nil {
 			return err
 		}
+		// SNI priority: --sni flag > OWN_DOMAIN > DOMAIN_FOR_TLS list > built-in.
 		chosenSNI := *sni
+		if chosenSNI == "" && ownDomain != "" {
+			chosenSNI = ownDomain // own domain = zero SNI<->IP mismatch (best)
+		}
+		if chosenSNI == "" {
+			if list := util.SplitList(env["DOMAIN_FOR_TLS"]); len(list) > 0 {
+				chosenSNI = list[reality.RandIndex(len(list))]
+				fmt.Printf("SNI из .env DOMAIN_FOR_TLS: %s\n", chosenSNI)
+			}
+		}
 		if chosenSNI == "" {
 			if chosenSNI, err = reality.PickSNI(); err != nil {
 				return err
@@ -191,6 +212,15 @@ func cmdInit(args []string) error {
 			PrivateKey: kp.PrivateKey, PublicKey: kp.PublicKey,
 			ShortIDs: sids, Fingerprint: reality.DefaultFingerprint,
 		}
+		// Split-tunnel: domains that egress directly from RU (no cascade). Seed
+		// from .env SPLIT_RU_DOMAINS plus our own host/domain so management and
+		// "our system" domains never loop through EU. Edit later: `vlr split`.
+		seed := util.SplitList(env["SPLIT_RU_DOMAINS"])
+		seed = append(seed, *host)
+		if ownDomain != "" {
+			seed = append(seed, ownDomain)
+		}
+		c.Split = config.SplitConfig{RUDirect: dedupNonEmpty(seed)}
 		if config.Role(*role) == config.RoleChild {
 			c.Child = config.ChildConfig{
 				MainURL: *mainURL, Token: *token, PullBearer: *pullBearer,

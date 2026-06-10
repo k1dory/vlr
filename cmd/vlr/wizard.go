@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 )
 
@@ -33,6 +35,26 @@ func ask(label, def string) string {
 		return def
 	}
 	return line
+}
+
+// askSecret reads a line without echoing it (for passwords). On Unix it toggles
+// the terminal echo via stty; on Windows it falls back to a normal read. No
+// external dependency.
+func askSecret(label string) string {
+	fmt.Printf("%s: ", label)
+	if runtime.GOOS != "windows" {
+		off := exec.Command("stty", "-echo")
+		off.Stdin = os.Stdin
+		_ = off.Run()
+		defer func() {
+			on := exec.Command("stty", "echo")
+			on.Stdin = os.Stdin
+			_ = on.Run()
+			fmt.Println()
+		}()
+	}
+	line, _ := stdinReader.ReadString('\n')
+	return strings.TrimSpace(line)
 }
 
 // runInitWizard fills the init parameters interactively. It returns the role and

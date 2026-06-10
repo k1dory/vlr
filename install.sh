@@ -61,9 +61,12 @@ CONFIG="/etc/vlr/config.json"
 # Interactive provisioning: show the mode menu, create the config, enable the
 # service. Only on a real terminal — in a pipe/CI we just print the next step.
 if [ -t 0 ] && [ -t 1 ]; then
+  # seed .env from the example so DOMAIN_FOR_TLS (console.yandex.cloud) applies
+  [ -f "$SRC_DIR/.env" ] || cp "$SRC_DIR/env.example" "$SRC_DIR/.env" 2>/dev/null || true
   if [ -f "$CONFIG" ]; then
     echo "конфиг уже есть: $CONFIG  (перенастроить: vlr init)"
   else
+    echo "  (SNI берётся из $SRC_DIR/.env → DOMAIN_FOR_TLS; свой домен — OWN_DOMAIN)"
     sudo "$BIN" init --config "$CONFIG" || {
       echo "настройка прервана — запусти позже: sudo vlr init"
       exit 0

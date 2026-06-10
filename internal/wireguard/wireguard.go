@@ -92,10 +92,13 @@ func RenderEntry(c *config.Config) (string, error) {
 	if w.ListenPort != 0 {
 		fmt.Fprintf(&b, "ListenPort = %d\n", w.ListenPort)
 	}
-	// fwmark + ip rule keeps node management traffic off the tunnel.
+	// fwmark + ip rule: only UNmarked traffic enters the tunnel (-> EU). Traffic
+	// marked with the fwmark (node management, and Xray's split-tunnel egress-ru)
+	// falls through to the main table and egresses directly from RU.
+	fw := config.CascadeFwmark
 	fmt.Fprintf(&b, "Table = off\n")
-	fmt.Fprintf(&b, "PostUp = ip route add default dev %%i table 51820; ip rule add not fwmark 51820 table 51820; wg set %%i fwmark 51820\n")
-	fmt.Fprintf(&b, "PostDown = ip rule del not fwmark 51820 table 51820\n\n")
+	fmt.Fprintf(&b, "PostUp = ip route add default dev %%i table %d; ip rule add not fwmark %d table %d; wg set %%i fwmark %d\n", fw, fw, fw, fw)
+	fmt.Fprintf(&b, "PostDown = ip rule del not fwmark %d table %d\n\n", fw, fw)
 	fmt.Fprintf(&b, "[Peer]\n")
 	fmt.Fprintf(&b, "# EU exit (Aeza)\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", w.ExitPublicKey)

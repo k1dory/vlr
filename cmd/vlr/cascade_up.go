@@ -25,6 +25,8 @@ func cmdCascadeUp(args []string) error {
 	euUser := fs.String("eu-user", "root", "EU SSH user")
 	euKey := fs.String("eu-key", "", "SSH private key path (key auth)")
 	euPass := fs.String("eu-pass", "", "SSH password (needs sshpass)")
+	exitName := fs.String("exit-name", "", "label for the EU exit, e.g. eu-aeza-de")
+	exitCountry := fs.String("exit-country", "", "EU exit country, e.g. DE")
 	wan := fs.String("wan", "", "EU WAN interface for NAT (empty = auto-detect)")
 	wgPort := fs.Int("wg-port", 51820, "EU WireGuard listen port")
 	iface := fs.String("iface", "wg-cascade", "WireGuard interface name")
@@ -34,8 +36,12 @@ func cmdCascadeUp(args []string) error {
 	skipCheck := fs.Bool("no-check", false, "skip the site healthcheck")
 	_ = fs.Parse(args)
 
+	// Interactive: no EU host on a terminal => ask for everything.
+	if *euHost == "" && isInteractive() {
+		cascadeUpWizard(euHost, euUser, euKey, euPass, exitName, exitCountry)
+	}
 	if *euHost == "" {
-		return fmt.Errorf("--eu-host is required")
+		return fmt.Errorf("--eu-host is required (or run `vlr cascade up` on a terminal)")
 	}
 	if *euKey == "" && *euPass == "" {
 		return fmt.Errorf("provide --eu-key or --eu-pass for EU access")
@@ -61,6 +67,13 @@ func cmdCascadeUp(args []string) error {
 	}
 
 	// 2. Provision the EU exit over SSH; capture its public key.
+	label := *exitName
+	if *exitCountry != "" {
+		label = strings.TrimSpace(*exitName + " " + *exitCountry)
+	}
+	if label != "" {
+		fmt.Printf("==> EU-выход «%s»\n", label)
+	}
 	fmt.Printf("==> провижу EU-выход %s (forward-only WireGuard)\n", *euHost)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -86,6 +99,8 @@ func cmdCascadeUp(args []string) error {
 	c.Cascade.ExitEndpoint = fmt.Sprintf("%s:%d", *euHost, *wgPort)
 	c.Cascade.ExitAllowedIP = "0.0.0.0/0, ::/0"
 	c.Cascade.ExitTunnelIP = *euIP
+	c.Cascade.ExitName = *exitName
+	c.Cascade.ExitCountry = *exitCountry
 	if c.Cascade.Keepalive == 0 {
 		c.Cascade.Keepalive = 25
 	}
@@ -137,6 +152,32 @@ func cmdCascadeUp(args []string) error {
 	}
 	fmt.Println("\n✓ каскад RU→EU работает")
 	return nil
+}
+
+// cascadeUpWizard interactively fills the EU exit parameters.
+func cascadeUpWizard(euHost, euUser, euKey, euPass, exitName, exitCountry *string) {
+	fmt.Print(`
+========================================
+   vlr — поднять каскад RU→EU
+========================================
+EU-выход будет настроен автоматически по SSH (forward-only WireGuard).
+
+`)
+	for *euHost == "" {
+		*euHost = ask("IP EU-выхода", "")
+	}
+	*euUser = ask("SSH-пользователь", "root")
+
+	switch ask("Доступ: 1) по ключу  2) по паролю", "1") {
+	case "2":
+		*euPass = askSecret("SSH-пароль (ввод скрыт)")
+	default:
+		*euKey = ask("Путь к приватному ключу", os.Getenv("HOME")+"/.ssh/id_ed25519")
+	}
+
+	*exitName = ask("Имя EU-выхода (метка, напр. eu-aeza-de)", *exitName)
+	*exitCountry = ask("Страна EU-выхода (напр. DE, NL, FI)", *exitCountry)
+	fmt.Println()
 }
 
 // cmdCascadeCheck re-runs the site healthcheck through an existing cascade.

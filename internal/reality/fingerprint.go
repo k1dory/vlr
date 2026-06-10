@@ -91,9 +91,18 @@ var RecommendedSNIs = []string{
 // PickSNI returns a deterministic-ish but unpredictable SNI from the
 // recommended list. Used by `vlr init` when the operator did not supply one.
 func PickSNI() (string, error) {
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(RecommendedSNIs))))
-	if err != nil {
-		return "", err
+	return RecommendedSNIs[RandIndex(len(RecommendedSNIs))], nil
+}
+
+// RandIndex returns a cryptographically random index in [0, n). For n <= 1 it
+// returns 0. Used to spread SNI/short-id choices unpredictably across nodes.
+func RandIndex(n int) int {
+	if n <= 1 {
+		return 0
 	}
-	return RecommendedSNIs[n.Int64()], nil
+	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return 0
+	}
+	return int(v.Int64())
 }
