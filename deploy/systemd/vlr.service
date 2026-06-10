@@ -1,19 +1,19 @@
 [Unit]
 Description=vlr VPN node daemon (VLESS+Reality cascade)
-After=network-online.target wg-quick@wg-cascade.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+# Ensure the local state dir exists before serving (standalone/child write here).
+ExecStartPre=-/usr/bin/mkdir -p /etc/vlr/data
 ExecStart=/usr/local/bin/vlr serve --config /etc/vlr/config.json
 Restart=on-failure
 RestartSec=3
-# vlr only needs to read its config and reach the network; tighten as needed.
-AmbientCapabilities=
-NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=/etc/vlr/data
-ProtectHome=true
+# Runs as root: the daemon shells out to `wg` for cascade health and needs to
+# read /etc/wireguard. Heavy namespace sandboxing (ProtectSystem=strict +
+# ReadWritePaths) caused 226/NAMESPACE and is intentionally omitted.
+NoNewPrivileges=false
 
 [Install]
 WantedBy=multi-user.target

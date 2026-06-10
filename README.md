@@ -13,6 +13,55 @@ One binary, three roles (chosen by the config file):
 | **child** | Same data plane, but reports to a main server: **pushes** cheap heartbeats and **exposes** a pull API the main calls on demand. |
 | **main** | No data plane. Ingests heartbeats, runs **delta-triggered pulls**, aggregates every child, issues subscriptions centrally. |
 
+## Установка (после `git clone`)
+
+На свежем сервере (Ubuntu/Debian, root):
+
+```bash
+git clone git@github.com:k1dory/vlr.git /opt/vlr
+cd /opt/vlr
+
+# Опционально: настроить домены-приманки и split-tunnel ДО установки
+cp env.example .env && nano .env        # DOMAIN_FOR_TLS / OWN_DOMAIN / SPLIT_RU_DOMAINS
+
+# Одна кнопка: ставит Go (если нет), собирает бинарь, кладёт глобальную команду
+# vlr в /usr/local/bin, ставит systemd-юнит, запускает интерактивный мастер
+# (меню режимов 1/2/3) и поднимает сервис.
+chmod +x install.sh
+./install.sh
+```
+
+Что делает `install.sh` по шагам:
+1. **Ставит Go 1.25**, если его нет (официальный бинарь; `VLR_AUTO_GO=0` — только показать команды).
+2. **Собирает** статический `vlr` (`CGO_ENABLED=0`, без внешних зависимостей).
+3. **Устанавливает** команду в `/usr/local/bin/vlr` и копирует `systemd`-юнит.
+4. **Запускает мастер** `vlr init` — спросит режим (1 самостоятельный / 2 дочерний / 3 main), ID узла, регион; публичный IP определит сам.
+5. **Включает сервис**: `systemctl enable --now vlr` (мониторинг + отдача подписки).
+
+Дальше — поднять транспорт (это пока отдельные шаги):
+
+```bash
+# Каскад RU→EU одной командой с RU-ноды (сам зайдёт на EU по SSH и поднимет WG):
+vlr cascade up                  # без флагов — интерактивно спросит IP/доступ/имя выхода
+#   или по флагам: vlr cascade up --eu-host 5.6.7.8 --eu-user root --eu-key ~/.ssh/id_ed25519
+
+vlr user add --email you@example.com --telegram-id 123456789   # печатает vless:// ссылку
+vlr user link --email you@example.com                           # ссылка + base64-подписка
+
+# Сгенерить конфиг Xray и перезапустить его:
+vlr render > /usr/local/etc/xray/config.json && systemctl restart xray
+```
+
+Проверка:
+
+```bash
+systemctl status vlr     # active (running)
+vlr status               # узел, режим, каскад, число юзеров
+vlr cascade check        # [OK]/[FAIL] по сайтам через каскад
+```
+
+> Обновление на сервере: `cd /opt/vlr && git pull && ./install.sh`.
+
 ## Why these choices
 
 - **Cascade = WireGuard, not SOCKS5/SSH.** The inner RU→EU hop carries *all*
@@ -31,7 +80,10 @@ One binary, three roles (chosen by the config file):
   or a reconcile interval elapses. Never hammers the node, never loses state.
   See [docs/MODES.md](docs/MODES.md).
 
-## Quick start (standalone)
+## Scripted setup (non-interactive, for automation)
+
+Same as above but with explicit flags instead of the wizard — useful for Ansible
+or many nodes:
 
 ```bash
 ./install.sh                  # build + install global `vlr` + systemd unit
