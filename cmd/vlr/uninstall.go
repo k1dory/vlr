@@ -212,8 +212,8 @@ func cmdUninstall(args []string) error {
 		step("опускаю локальный туннель " + i)
 		sys("wg-quick", "down", i)
 		sys("systemctl", "disable", "wg-quick@"+i)
-		// best-effort: remove the split-tunnel policy rule if it lingered.
-		sys("ip", "rule", "del", "not", "fwmark", fmt.Sprintf("%d", config.CascadeFwmark), "table", fmt.Sprintf("%d", config.CascadeFwmark))
+		// best-effort: remove the cascade policy rule if it lingered.
+		sys("ip", "rule", "del", "fwmark", fmt.Sprintf("%d", config.CascadeFwmark), "table", fmt.Sprintf("%d", config.CascadeFwmark))
 		rmf("/etc/wireguard/" + i + ".conf")
 	}
 

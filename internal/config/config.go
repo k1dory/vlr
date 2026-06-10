@@ -20,11 +20,13 @@ import (
 	"path/filepath"
 )
 
-// CascadeFwmark is the SO_MARK / WireGuard fwmark that means "bypass the RU->EU
-// tunnel and egress directly from the RU node". The WG interface marks its own
-// encapsulated packets with it, and the policy rule `ip rule not fwmark <this>
-// table <this>` sends only UNmarked traffic into the tunnel. Xray's split-tunnel
-// `egress-ru` outbound sets this mark so its connections exit RU directly.
+// CascadeFwmark is the SO_MARK / WireGuard fwmark that means "send this through
+// the RU->EU cascade tunnel". Xray's default `egress` outbound sets this mark on
+// its sockets, and the policy rule `ip rule fwmark <this> table <this>` routes
+// ONLY marked traffic into the tunnel. Everything unmarked — the node's own
+// traffic (SSH, apt) and Xray's split-tunnel `egress-ru` — stays on the main
+// table and egresses directly from RU. Marking the EU path (not the bypass path)
+// is what keeps a remote `wg-quick up` from capturing your SSH session.
 const CascadeFwmark = 51820
 
 // Role is the node's operating mode.

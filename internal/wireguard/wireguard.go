@@ -92,13 +92,17 @@ func RenderEntry(c *config.Config) (string, error) {
 	if w.ListenPort != 0 {
 		fmt.Fprintf(&b, "ListenPort = %d\n", w.ListenPort)
 	}
-	// fwmark + ip rule: only UNmarked traffic enters the tunnel (-> EU). Traffic
-	// marked with the fwmark (node management, and Xray's split-tunnel egress-ru)
-	// falls through to the main table and egresses directly from RU.
+	// fwmark + ip rule: ONLY traffic marked with the cascade fwmark enters the
+	// tunnel (-> EU). Xray marks its EU-bound egress with this fwmark; everything
+	// else — the node's own traffic (SSH, apt) AND Xray's split-tunnel egress-ru —
+	// is unmarked and stays on the main table, egressing directly from RU.
+	//
+	// This is the safe direction: a remote `wg-quick up` does NOT capture the SSH
+	// session you are on (the old "not fwmark" rule did, and froze it).
 	fw := config.CascadeFwmark
 	fmt.Fprintf(&b, "Table = off\n")
-	fmt.Fprintf(&b, "PostUp = ip route add default dev %%i table %d; ip rule add not fwmark %d table %d; wg set %%i fwmark %d\n", fw, fw, fw, fw)
-	fmt.Fprintf(&b, "PostDown = ip rule del not fwmark %d table %d\n\n", fw, fw)
+	fmt.Fprintf(&b, "PostUp = ip route add default dev %%i table %d; ip rule add fwmark %d table %d\n", fw, fw, fw)
+	fmt.Fprintf(&b, "PostDown = ip rule del fwmark %d table %d 2>/dev/null || true\n\n", fw, fw)
 	fmt.Fprintf(&b, "[Peer]\n")
 	fmt.Fprintf(&b, "# EU exit (Aeza)\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", w.ExitPublicKey)

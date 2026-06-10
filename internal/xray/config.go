@@ -153,23 +153,26 @@ func Render(c *config.Config, users []store.User) ([]byte, error) {
 			},
 		},
 		"outbounds": []any{
-			// DEFAULT egress: unmarked freedom. The host routing table (wg-cascade
-			// PostUp) sends unmarked traffic into the tunnel -> EU exit.
+			// DEFAULT egress (-> EU): freedom MARKED with the cascade fwmark. The
+			// `ip rule fwmark` policy routes only marked traffic into wg-cascade,
+			// so this is the only traffic that cascades to the EU exit. Requires
+			// Xray to run with CAP_NET_ADMIN (it runs as root by default) to set
+			// SO_MARK.
 			map[string]any{
 				"tag":      "egress",
-				"protocol": "freedom",
-				"settings": map[string]any{"domainStrategy": "UseIPv4"},
-			},
-			// SPLIT-TUNNEL egress: freedom marked with the cascade fwmark, so the
-			// `ip rule not fwmark` policy lets it bypass the tunnel and leave
-			// directly from the RU node. Used for the RU-direct domain list.
-			map[string]any{
-				"tag":      "egress-ru",
 				"protocol": "freedom",
 				"settings": map[string]any{"domainStrategy": "UseIPv4"},
 				"streamSettings": map[string]any{
 					"sockopt": map[string]any{"mark": config.CascadeFwmark},
 				},
+			},
+			// SPLIT-TUNNEL egress (-> direct RU): unmarked freedom. Unmarked means
+			// the main routing table, i.e. straight out the RU node's NIC. Used for
+			// the RU-direct domain list.
+			map[string]any{
+				"tag":      "egress-ru",
+				"protocol": "freedom",
+				"settings": map[string]any{"domainStrategy": "UseIPv4"},
 			},
 			map[string]any{
 				"tag":      "block",

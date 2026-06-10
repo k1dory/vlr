@@ -144,6 +144,10 @@ func cmdCascadeUp(args []string) error {
 	}
 	fmt.Printf("==> поднимаю туннель RU (%s)\n", *iface)
 	_ = exec.CommandContext(ctx, "wg-quick", "down", *iface).Run() // ignore if not up
+	// Best-effort: drop a stale "not fwmark" policy rule left by older versions,
+	// so it can't keep capturing the node's own (SSH) traffic.
+	fwStr := fmt.Sprintf("%d", config.CascadeFwmark)
+	_ = exec.CommandContext(ctx, "ip", "rule", "del", "not", "fwmark", fwStr, "table", fwStr).Run()
 	if out, err := exec.CommandContext(ctx, "wg-quick", "up", *iface).CombinedOutput(); err != nil {
 		return fmt.Errorf("wg-quick up %s: %w\n%s", *iface, err, out)
 	}

@@ -7,24 +7,29 @@ slower/geo-blocked through EU. That is split-tunneling.
 
 ## How it works (fwmark, one tunnel)
 
-The RU WireGuard config already routes by fwmark:
+The RU WireGuard config routes **only marked** traffic into the tunnel:
 
 ```
-ip rule add not fwmark 51820 table 51820   # UNmarked traffic -> tunnel -> EU
-# WireGuard marks its own packets 51820 -> they fall through to the main table
+ip rule add fwmark 51820 table 51820   # ONLY fwmark-51820 traffic -> tunnel -> EU
 ```
 
-So "go direct from RU" simply means "carry fwmark 51820". The Xray config has two
-egress outbounds:
+So "go to EU" means "carry fwmark 51820"; everything unmarked stays direct. The
+Xray config has two egress outbounds:
 
 | Outbound | Mark | Path |
 |---|---|---|
-| `egress` (default) | none | unmarked → tunnel → **EU exit** |
-| `egress-ru` | `sockopt.mark = 51820` | bypasses tunnel → **direct RU egress** |
+| `egress` (default) | `sockopt.mark = 51820` | marked → tunnel → **EU exit** |
+| `egress-ru` | none | unmarked → main table → **direct RU egress** |
 
-A routing rule sends the RU-direct domain list to `egress-ru`; everything else
-falls to `egress` (EU). One tunnel, no extra routing tables. When the cascade is
-not enabled, both egress paths are simply direct (the mark is a no-op).
+A routing rule sends the RU-direct domain list to `egress-ru` (direct); everything
+else falls to `egress` (EU). Crucially, the **node's own traffic is also unmarked**,
+so it egresses directly — a remote `wg-quick up` never captures your SSH session.
+One tunnel, no extra tables. When the cascade is off, marked traffic just has no
+tunnel to enter and goes direct too (no-op).
+
+> Xray must run with `CAP_NET_ADMIN` (it runs as **root** by default, which has it)
+> to set `SO_MARK`. Without it, EU-bound traffic can't be marked and would leak
+> out directly.
 
 ## Managing the list
 
