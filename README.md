@@ -106,20 +106,37 @@ vlr user link --telegram-id 123456789  # share link + base64 subscription
 systemctl enable --now vlr             # node daemon (monitor + subscription)
 ```
 
-## Quick start (child + main)
+## Attaching a node to a control plane (child)
+
+A node can report to a central server. The recommended control plane is the
+separate **`vlr-main-agent`** project (PostgreSQL + ClickHouse + central
+subscriptions). To attach an existing node, run **`vlr node connect`** on it — it
+switches the node to the `child` role **in place (keeps the Reality keys, so no
+client link breaks)**, generates the heartbeat/pull tokens, and (given the
+agent's admin token) registers the node on the agent in one shot:
 
 ```bash
-# main server (EU, no VPN data plane)
+vlr node connect                 # no flags = interactive: asks for the agent URL,
+                                 # this node's reachable API URL, tokens, etc.
+#   or scripted:
+vlr node connect --agent https://main.example:8443 \
+    --node-url https://93.77.160.10:9777 --agent-token <AGENT_API_TOKEN>
+
+systemctl restart vlr            # daemon now pushes heartbeats + serves the pull API
+```
+
+> `vlr node connect` defaults the node API bind to `0.0.0.0:9777` so the agent can
+> reach it — put TLS in front of it (the agent verifies certs; use `NODE_CA_FILE`
+> / `NODE_TLS_INSECURE` on the agent for self-signed).
+
+The node binary also has a built-in zero-dep `role: main` (in-memory aggregator)
+for a small single-fleet setup:
+
+```bash
 vlr init --role main --node-id main-eu --api-listen 0.0.0.0:8443
 vlr node register --node-id ru-yc-msk-01 \
     --pull-url https://ru-node:9777/v1/pull --bearer <PULL_TOKEN>
 vlr serve     # ingests heartbeats, schedules delta-pulls
-
-# child node (RU)
-vlr init --role child --node-id ru-yc-msk-01 --host 93.77.160.10 \
-    --main-url https://main-eu:8443/v1
-# set child.token / child.pull_bearer in the config, then:
-vlr serve     # pushes heartbeats, exposes pull API
 ```
 
 ## Commands
@@ -130,7 +147,7 @@ vlr keys        generate Reality / WireGuard keys (--type reality|wireguard)
 vlr cascade     up | check | gen | exit | test   (RU->EU WireGuard hop)
 vlr user        add | rm | list | link           (all fields optional; auto-applies Xray)
 vlr split       add | rm | list                  (RU-direct domains, split-tunnel)
-vlr node        register | list                  (main role)
+vlr node        connect (attach to a main agent) | register | list (main role)
 vlr up          install/refresh Xray + apply config (one-shot data-plane bring-up)
 vlr render      print the Xray config for this node
 vlr serve       run the daemon for this node's role

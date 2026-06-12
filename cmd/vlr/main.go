@@ -101,7 +101,7 @@ COMMANDS
   cascade     gen|exit|test the RU->EU WireGuard hop
   user        add|rm|list|link  (all fields optional; auto-applies Xray)
   split       add|rm|list  RU-direct domains (split-tunnel: egress from RU, not EU)
-  node        register|list (main role)
+  node        connect (attach this node to a main agent) | register|list (main role)
   up          install/refresh Xray + apply config (one-shot data-plane bring-up)
   render      print the Xray config
   serve       run the node daemon for this node's role
@@ -504,9 +504,14 @@ func orDash(s string) string {
 
 func cmdNode(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: vlr node register|list")
+		return fmt.Errorf("usage: vlr node connect|register|list")
 	}
 	sub, rest := args[0], args[1:]
+	// `node connect` runs on a CHILD (RU) node to attach it to a main agent — it
+	// does not touch the main-role registry below.
+	if sub == "connect" {
+		return cmdNodeConnect(rest)
+	}
 	fs := newFlagSet("node")
 	cfgPath := fs.String("config", "", "config path")
 	nodeID := fs.String("node-id", "", "child node id")
