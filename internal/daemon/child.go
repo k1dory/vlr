@@ -88,6 +88,15 @@ func (c *Child) heartbeatLoop(ctx context.Context) {
 
 func (c *Child) sendHeartbeat(ctx context.Context) {
 	up, _ := c.mon.Healthy(ctx)
+	// Refresh per-user counters before reporting, so the heartbeat's total_bytes
+	// is current. Without this, the main's traffic-delta pull trigger would only
+	// see byte growth at pull time (chicken-and-egg) and fall back to the slow
+	// reconcile timer. Best-effort: a stats failure must not drop the heartbeat.
+	if c.stats != nil {
+		if err := c.stats.Poll(ctx, c.store); err != nil {
+			c.log.Warn("stats poll failed", "err", err)
+		}
+	}
 	hb := protocol.Heartbeat{
 		NodeID:        c.cfg.NodeID,
 		Seq:           c.seq.Add(1),
@@ -140,13 +149,28 @@ func (c *Child) handlePull(w http.ResponseWriter, r *http.Request) {
 	det := make([]protocol.UserDetail, 0, len(users))
 	for _, u := range users {
 		det = append(det, protocol.UserDetail{
-			UUID: u.UUID, Email: u.Email, TelegramID: u.TelegramID, Profile: u.Profile,
+			UUID: u.UUID, Email: u.Email, TelegramID: u.TelegramID, ExternalID: u.ExternalID,
+			Profile: u.Profile, ShortID: u.ShortID,
 			Enabled: u.Enabled, RxBytes: u.RxBytes, TxBytes: u.TxBytes,
 		})
 	}
 	writeJSON(w, http.StatusOK, protocol.PullResponse{
 		NodeID:        c.cfg.NodeID,
 		ConfigVersion: c.store.ConfigVersion(),
+		Entry:         entrySnapshot(c.cfg.Entry),
 		Users:         det,
 	})
+}
+
+// entrySnapshot copies the PUBLIC Reality entry params for the main to rebuild
+// links. The private key is deliberately omitted.
+func entrySnapshot(e config.EntryConfig) protocol.EntrySnapshot {
+	return protocol.EntrySnapshot{
+		Host:        e.Host,
+		Port:        e.Port,
+		SNI:         e.SNI,
+		PublicKey:   e.PublicKey,
+		Fingerprint: e.Fingerprint,
+		ShortIDs:    e.ShortIDs,
+	}
 }

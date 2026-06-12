@@ -31,8 +31,31 @@ heard vs pulled config_version & bytes, last_pull).
 
 ### `GET /v1/pull`
 Main → child heavy detail fetch. Requires `Authorization: Bearer
-<child.pull_bearer>`. Returns `protocol.PullResponse` (per-user accounting +
-config version). Called only when `protocol.ShouldPull` fires.
+<child.pull_bearer>`. Returns `protocol.PullResponse` and is called only when
+`protocol.ShouldPull` fires. The payload carries everything the main needs to
+both account traffic **and** rebuild each client's `vless://` link centrally:
+
+```json
+{
+  "node_id": "ru-yc-msk-01",
+  "config_version": 17,
+  "entry": {
+    "host": "node1.example.com", "port": 443, "sni": "www.tinkoff.ru",
+    "public_key": "<reality pubkey>", "fingerprint": "randomized",
+    "short_ids": ["0a1b2c3d", "..."]
+  },
+  "users": [
+    { "uuid": "...", "email": "a@x", "telegram_id": 9876567, "external_id": "",
+      "profile": "vision", "short_id": "0a1b2c3d", "enabled": true,
+      "rx_bytes": 12345, "tx_bytes": 67890 }
+  ]
+}
+```
+
+The `entry` block is **public** Reality material only (no server private key).
+`short_id` + `entry` let `vlr-main-agent` reconstruct the exact link the node
+issued. This is the data the external main agent persists (keys → PostgreSQL,
+traffic → ClickHouse).
 
 ### `GET /healthz`
 `200 {"cascade_up": <bool>}`.
@@ -44,8 +67,9 @@ by `vlr init`; empty token disables these endpoints). This is the prod automatio
 surface — every field is optional, and creating a user auto-renders + reloads Xray.
 
 ### `POST /v1/users`
-Create a user. Body (all optional): `{"telegram_id":9876567,"id":"cust-42","email":"","profile":"mobile"}`
-— or even `{}`. Returns:
+Create a user. Body (all optional): `{"telegram_id":9876567,"id":"cust-42","email":"","profile":"vision"}`
+— or even `{}`. `profile` is opt-in: `"vision"` = XTLS-Vision (mobile only),
+empty/omitted = plain VLESS+Reality (works on every client). Returns:
 ```json
 { "uuid":"...", "link":"vless://...#tg9876567", "subscription":"<base64>" }
 ```
@@ -64,9 +88,11 @@ List users (token-guarded).
 > `127.0.0.1:9777`). For public prod use, front it with TLS (the Reality :443 SNI
 > router or a reverse proxy) — do not expose `:9777` raw.
 
-### `GET /sub/<ref>`
-Returns the **base64 subscription** for that user (import URL for
-v2rayNG/Hiddify/NekoBox). Sets a `Profile-Title` header.
+### `GET /sub/<email>`
+**Standalone role only.** Returns the **base64 subscription** for the user with
+that `email` (import URL for v2rayNG/Hiddify/NekoBox). Sets a `Profile-Title`
+header. Matches by email only — a user created without an email has no `/sub`
+path; fetch its link via `vlr user link` or the `POST /v1/users` response.
 
 ### `GET /healthz`
 `200 {"node":..., "cascade_up":..., "users":...}`.

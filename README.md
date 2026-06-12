@@ -45,11 +45,12 @@ chmod +x install.sh
 vlr cascade up                  # без флагов — интерактивно спросит IP/доступ/имя выхода
 #   или по флагам: vlr cascade up --eu-host 5.6.7.8 --eu-user root --eu-key ~/.ssh/id_ed25519
 
-vlr user add --email you@example.com --telegram-id 123456789   # печатает vless:// ссылку
-vlr user link --email you@example.com                           # ссылка + base64-подписка
+# Поднять data-plane одной командой: поставить xray-core (если нет), выдать ему
+# CAP_NET_ADMIN, отрендерить конфиг и перезапустить + диагностика:
+vlr up
 
-# Сгенерить конфиг Xray и перезапустить его:
-vlr render > /usr/local/etc/xray/config.json && systemctl restart xray
+vlr user add --telegram-id 123456789       # создаёт юзера, сам обновляет Xray, печатает vless://
+vlr user link --telegram-id 123456789      # ссылка + base64-подписка
 ```
 
 Проверка:
@@ -75,8 +76,10 @@ vlr cascade check        # [OK]/[FAIL] по сайтам через каскад
   Google SNI is reset on sight; JA4+ now matches static fingerprints. `vlr`
   defaults to a randomized ClientHello (no stable signature) and **refuses Google
   SNIs**. See [docs/FINGERPRINT.md](docs/FINGERPRINT.md).
-- **Vision is per-profile.** XTLS-Vision regresses on desktop, so `--profile
-  desktop` users get plain VLESS+Reality (no `flow`); `mobile` keeps Vision.
+- **Vision is opt-in per user.** XTLS-Vision regresses on desktop and Xray pins
+  the flow per UUID, so the default (empty profile) is plain VLESS+Reality (no
+  `flow`, works on every client incl. Windows/macOS). Pass `--profile vision`
+  for a mobile-only user to enable `xtls-rprx-vision`.
 - **Child↔Main = push heartbeat + delta-triggered pull.** Cheap constant-size
   heartbeat = liveness (a gap = node/internet down). Heavy per-user detail is
   pulled only when traffic crosses a threshold, config changes, a node recovers,
@@ -97,9 +100,9 @@ vlr init --role standalone --node-id ru-yc-msk-01   # public IP auto-detected
 vlr cascade up --eu-host 5.6.7.8 --eu-user root --eu-key ~/.ssh/id_ed25519
 # ends with a [OK]/[FAIL] reachability table through the tunnel
 
-vlr user add --email you@example.com --telegram-id 123456789   # prints a vless:// share link
-vlr user link --email you@example.com  # share link + base64 subscription
-vlr render > /usr/local/etc/xray/config.json && systemctl restart xray
+vlr up                                 # install/refresh Xray + apply config (one-shot)
+vlr user add --telegram-id 123456789   # prints a vless:// share link, auto-applies Xray
+vlr user link --telegram-id 123456789  # share link + base64 subscription
 systemctl enable --now vlr             # node daemon (monitor + subscription)
 ```
 
@@ -122,14 +125,18 @@ vlr serve     # pushes heartbeats, exposes pull API
 ## Commands
 
 ```
-vlr init        provision this node (--role standalone|child|main)
+vlr init        provision this node (--role standalone|child|main; no flags = wizard)
 vlr keys        generate Reality / WireGuard keys (--type reality|wireguard)
-vlr cascade     gen | exit | test   (RU->EU WireGuard hop)
-vlr user        add | rm | list | link
-vlr node        register | list      (main role)
+vlr cascade     up | check | gen | exit | test   (RU->EU WireGuard hop)
+vlr user        add | rm | list | link           (all fields optional; auto-applies Xray)
+vlr split       add | rm | list                  (RU-direct domains, split-tunnel)
+vlr node        register | list                  (main role)
+vlr up          install/refresh Xray + apply config (one-shot data-plane bring-up)
 vlr render      print the Xray config for this node
 vlr serve       run the daemon for this node's role
 vlr status      show node status
+vlr uninstall   reverse everything vlr installed (declarative rollback)
+vlr ledger      record | list the install ledger
 vlr version
 ```
 

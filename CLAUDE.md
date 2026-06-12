@@ -25,8 +25,9 @@ FlyTelega (Aeza + Yandex Cloud API docs).
   not Xray dialerProxy (double Reality, slower). Inner hop is DC↔DC → no camouflage.
 - **Fingerprint default = `randomized`, never `chrome`.** Google SNIs are rejected
   in code (`reality.ValidateSNI`). See `docs/FINGERPRINT.md`.
-- **Vision is per-profile.** `desktop` profile = plain VLESS+Reality (no `flow`);
-  `mobile` = `xtls-rprx-vision`.
+- **Vision is opt-in per user.** Default (empty profile) = plain VLESS+Reality
+  (no `flow`, works on every client); `profile=vision` = `xtls-rprx-vision`
+  (mobile only). Xray pins the flow per UUID, so one credential can't be both.
 - **Entry on trusted RU cloud (Yandex), exit on cheap EU (Aeza).** RU mobile DPI
   blocks by hosting-IP reputation — Aeza ranges get blocked on mobile, so Aeza is
   the EU *exit*, never the RU entry. (Genomed-mtproto lesson.)
@@ -47,7 +48,7 @@ FlyTelega (Aeza + Yandex Cloud API docs).
 ```
 make build | test | vet | build-linux
 ./install.sh           # global `vlr` + systemd unit (like mtg's install.sh)
-vlr init|keys|cascade|user|node|render|serve|status|version
+vlr init|keys|cascade|user|split|node|up|render|serve|status|uninstall|ledger|version
 ```
 
 ## Layout
@@ -57,13 +58,20 @@ daemon,cascade,config,util}` · `deploy/` · `docs/`.
 
 ## Not done yet (next iterations)
 
-- Real `StatsPoller` against Xray StatsService gRPC (currently `cascade.NoopStats`).
-- Heartbeat bearer verification on the main (`handleHeartbeat` TODO).
-- PostgreSQL persistence on main (currently in-memory `detail` map).
-- `vlr up/down` that also renders Xray + restarts it (the cascade is already
-  automated: `vlr cascade up` provisions the EU exit over SSH and brings WG up;
-  Xray render/restart is still manual via `vlr render`).
-- TG bot + web subscription frontend (per White_Rabbit design system).
+- Heartbeat bearer verification on the **in-tree** `role: main` (`handleHeartbeat`
+  TODO) — it accepts any well-formed heartbeat, so it is dev / single-fleet only.
+  The production control plane (`vlr-main-agent`, separate repo) verifies the
+  per-node heartbeat token and persists to PostgreSQL + ClickHouse.
+- `vlr down` (the symmetric teardown of `vlr up`). `vlr up` is done: it installs
+  xray-core if missing, grants it `CAP_NET_ADMIN`, renders the config and restarts
+  Xray with a self-diagnosis. The cascade is automated too (`vlr cascade up`).
+- TG subscription-gate bot + web subscription frontend (the bot is a separate
+  component of `vlr-main-agent`).
+
+Done since first draft: per-user traffic stats are real now — `cascade.XrayStats`
+shells out to `xray api statsquery` (no gRPC dep) and is auto-selected when the
+xray binary is present (`pickStats`). Per-user identity in the Xray config is
+`xray.StatID` (email, else UUID) so users without an email still get accounted.
 
 ## Declarative install/uninstall (ledger)
 

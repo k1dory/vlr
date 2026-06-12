@@ -20,7 +20,7 @@ type createUserReq struct {
 	TelegramID int64  `json:"telegram_id"`
 	ID         string `json:"id"`      // external/system id
 	Email      string `json:"email"`   // optional label
-	Profile    string `json:"profile"` // mobile|desktop, default mobile
+	Profile    string `json:"profile"` // "vision" = XTLS-Vision (mobile); empty = plain Reality (default)
 }
 
 type createUserResp struct {

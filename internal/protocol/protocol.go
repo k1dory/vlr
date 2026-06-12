@@ -30,18 +30,35 @@ type Heartbeat struct {
 
 // PullResponse is the heavy detail the main fetches on demand.
 type PullResponse struct {
-	NodeID        string       `json:"node_id"`
-	ConfigVersion int64        `json:"config_version"`
-	Users         []UserDetail `json:"users"`
-	XrayConfig    string       `json:"xray_config,omitempty"` // optional full config snapshot
+	NodeID        string        `json:"node_id"`
+	ConfigVersion int64         `json:"config_version"`
+	Entry         EntrySnapshot `json:"entry"` // public Reality params, for central link rebuild
+	Users         []UserDetail  `json:"users"`
+	XrayConfig    string        `json:"xray_config,omitempty"` // optional full config snapshot
 }
 
-// UserDetail is one user's full accounting record.
+// EntrySnapshot is the PUBLIC Reality entry parameters the main needs to rebuild
+// a client's vless:// link centrally. It carries only what already appears in a
+// client config — never the server private key.
+type EntrySnapshot struct {
+	Host        string   `json:"host"`
+	Port        int      `json:"port"`
+	SNI         string   `json:"sni"`
+	PublicKey   string   `json:"public_key"`
+	Fingerprint string   `json:"fingerprint"`
+	ShortIDs    []string `json:"short_ids"`
+}
+
+// UserDetail is one user's full accounting record. ShortID is the per-user Reality
+// short id, included so the main can rebuild the exact vless:// link the node
+// issued without re-deriving it.
 type UserDetail struct {
 	UUID       string `json:"uuid"`
 	Email      string `json:"email"`
 	TelegramID int64  `json:"telegram_id"`
+	ExternalID string `json:"external_id"`
 	Profile    string `json:"profile"`
+	ShortID    string `json:"short_id"`
 	Enabled    bool   `json:"enabled"`
 	RxBytes    int64  `json:"rx_bytes"`
 	TxBytes    int64  `json:"tx_bytes"`

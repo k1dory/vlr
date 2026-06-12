@@ -74,6 +74,18 @@ func buildRoutingRules(c *config.Config) []any {
 	return rules
 }
 
+// StatID is the per-client identity Xray records traffic under (the inbound
+// client's `email`). It must be unique and stable per user: vlr uses the user's
+// email when set (AddUser keeps non-empty emails unique), else the UUID. The
+// stats poller maps this back via store.UpdateTraffic. Without this, users with
+// an empty email would collide under the "" stat key and lose accounting.
+func StatID(u store.User) string {
+	if u.Email != "" {
+		return u.Email
+	}
+	return u.UUID
+}
+
 // Render returns the Xray config JSON for the given node config + user list.
 func Render(c *config.Config, users []store.User) ([]byte, error) {
 	if c.Entry.Dest == "" {
@@ -87,7 +99,7 @@ func Render(c *config.Config, users []store.User) ([]byte, error) {
 		}
 		cl := map[string]any{
 			"id":    u.UUID,
-			"email": u.Email,
+			"email": StatID(u), // stable, UNIQUE per-client stat identity
 		}
 		// Vision is OPT-IN (profile=="vision"), because XTLS-Vision breaks many
 		// desktop (Windows/macOS) clients and Xray pins the flow per UUID, so one

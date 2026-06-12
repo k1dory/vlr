@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -619,14 +620,14 @@ func cmdServe(args []string) error {
 			return err
 		}
 		mon := pickMonitor(c)
-		return daemon.NewChild(c, st, log, cascade.NoopStats{}, mon).Run(ctx)
+		return daemon.NewChild(c, st, log, pickStats(), mon).Run(ctx)
 	case config.RoleStandalone:
 		st, err := store.Open(dataDir(c))
 		if err != nil {
 			return err
 		}
 		mon := pickMonitor(c)
-		return daemon.NewStandalone(c, st, log, cascade.NoopStats{}, mon).Run(ctx)
+		return daemon.NewStandalone(c, st, log, pickStats(), mon).Run(ctx)
 	default:
 		return fmt.Errorf("unknown role %q", c.Role)
 	}
@@ -637,6 +638,16 @@ func pickMonitor(c *config.Config) daemon.CascadeMonitor {
 		return cascade.WGMonitor{Interface: c.Cascade.Interface}
 	}
 	return cascade.NoopMonitor{}
+}
+
+// pickStats uses the real Xray stats poller when the xray binary is present
+// (a serving node), and a no-op otherwise (dev/Windows, where there is no Xray
+// to query) so the daemon stays runnable everywhere.
+func pickStats() daemon.StatsPoller {
+	if _, err := exec.LookPath("xray"); err == nil {
+		return cascade.XrayStats{}
+	}
+	return cascade.NoopStats{}
 }
 
 // --- status ----------------------------------------------------------------

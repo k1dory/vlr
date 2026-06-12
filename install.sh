@@ -119,7 +119,7 @@ if [ -t 0 ] && [ -t 1 ]; then
   echo
   echo "Готово. Дальше — каскад RU→EU (одной командой с этой ноды) и Xray:"
   echo "  vlr cascade up --eu-host <EU_IP> --eu-user root --eu-key ~/.ssh/id_ed25519"
-  echo "  vlr render > /usr/local/etc/xray/config.json && systemctl restart xray"
+  echo "  vlr up         # поставит/обновит Xray, применит конфиг, перезапустит + диагностика"
 else
   echo "next: sudo vlr init    # интерактивное меню режимов (1/2/3), затем: systemctl enable --now vlr"
 fi

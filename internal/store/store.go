@@ -22,7 +22,7 @@ type User struct {
 	TelegramID int64     `json:"telegram_id"` // optional owner's Telegram user id
 	ExternalID string    `json:"external_id"` // optional external/system id
 	ShortID    string    `json:"short_id"`    // Reality short id handed to this user
-	Profile    string    `json:"profile"`     // "mobile" | "desktop" (decides flow)
+	Profile    string    `json:"profile"`     // "vision" = XTLS-Vision (mobile); empty = plain Reality
 	CreatedAt  time.Time `json:"created_at"`
 	Enabled    bool      `json:"enabled"`
 	// RxBytes/TxBytes are the last-known per-user counters (filled by the stats
@@ -174,16 +174,20 @@ func (s *Store) TotalBytes() int64 {
 	return t
 }
 
-// UpdateTraffic sets per-user counters (called by the stats poller).
-func (s *Store) UpdateTraffic(email string, rx, tx int64) error {
+// UpdateTraffic sets per-user counters (called by the stats poller). The ref is
+// the Xray per-client stat identity, which vlr renders as the user's email when
+// set, else its UUID (see xray.StatID) — so this matches on either, and a user
+// without an email is still accounted.
+func (s *Store) UpdateTraffic(ref string, rx, tx int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.st.Users {
-		if s.st.Users[i].Email == email {
-			s.st.Users[i].RxBytes = rx
-			s.st.Users[i].TxBytes = tx
+		u := &s.st.Users[i]
+		if u.UUID == ref || (u.Email != "" && u.Email == ref) {
+			u.RxBytes = rx
+			u.TxBytes = tx
 			return s.flushLocked()
 		}
 	}
-	return fmt.Errorf("user %q not found", email)
+	return fmt.Errorf("user %q not found", ref)
 }

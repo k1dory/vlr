@@ -42,8 +42,17 @@ child node ──push heartbeat (cheap, ~20s)──►  main server
 - Heartbeat: `{node_id, seq, healthy, cascade_up, user_count, config_version,
   total_bytes}` — constant size, always tells the main "alive + summary". A
   missing heartbeat = node DOWN (closes the pure-pull blind spot).
-- Pull: `GET /v1/pull` returns full per-user accounting. The main calls it only
-  when `protocol.ShouldPull` fires (see [MODES.md](MODES.md)).
+- Pull: `GET /v1/pull` returns full per-user accounting **plus the public Reality
+  entry snapshot and each user's short id**, so the main can also rebuild every
+  client's `vless://` link. The main calls it only when `protocol.ShouldPull`
+  fires (see [MODES.md](MODES.md)).
+
+The node binary's built-in `role: main` is an in-memory aggregator (zero-dep,
+good for a single small fleet). The production control plane is a **separate
+project, `vlr-main-agent`** (its own repo): it ingests the same heartbeat/pull
+protocol but persists keys to **PostgreSQL** and traffic to **ClickHouse**,
+issues subscriptions centrally, and hosts the Telegram subscription bot. Keeping
+it out-of-tree is what lets this binary stay dependency-free.
 
 ## Components
 

@@ -57,10 +57,10 @@ type NoopMonitor struct{}
 // Healthy always returns true.
 func (NoopMonitor) Healthy(ctx context.Context) (bool, error) { return true, nil }
 
-// NoopStats is a stats poller that does nothing. The real implementation will
-// query Xray's StatsService (grpc on 127.0.0.1:10085) and call
-// store.UpdateTraffic per user; that pulls in the Xray API proto, so it lives
-// behind a build tag in a later iteration.
+// NoopStats is a stats poller that does nothing — used in dev / on Windows where
+// there is no Xray to query. The real poller is XrayStats (see stats.go), which
+// shells out to `xray api statsquery` and is selected automatically on a serving
+// node where the xray binary is present.
 type NoopStats struct{}
 
 // Poll does nothing.
