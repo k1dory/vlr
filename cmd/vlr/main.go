@@ -3,7 +3,7 @@
 //	vlr init        provision this node (standalone | child | main)
 //	vlr keys        generate Reality / WireGuard key material
 //	vlr cascade     generate RU<->EU WireGuard configs / test the hop
-//	vlr user        add | rm | list | link (base64 subscription)
+//	vlr user        add | rm | list | link | rotate (base64 subscription)
 //	vlr node        register | list child nodes (main role)
 //	vlr render      print the Xray config for this node
 //	vlr serve       run the daemon for this node's role
@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -149,21 +150,27 @@ func cmdInit(args []string) error {
 	token := fs.String("token", "", "child: node token for heartbeat auth")
 	pullBearer := fs.String("pull-bearer", "", "child: bearer the main must present to pull")
 	apiListen := fs.String("api-listen", "0.0.0.0:8443", "main: API listen address")
+	subBaseURL := fs.String("sub-base-url", "", "public origin fronting the subscription endpoint, e.g. https://link.infrashark.tech")
+	authentikWebhookSecret := fs.String("authentik-webhook-secret", "", "bearer secret the Authentik webhook must present to auto-revoke users (event-driven)")
+	authentikURL := fs.String("authentik-url", "", "optional reconcile backstop: Authentik base URL, e.g. https://auth.genomed-security.ru")
+	authentikToken := fs.String("authentik-token", "", "optional reconcile backstop: Authentik service-account API token")
+	authentikReconcile := fs.Int("authentik-reconcile-seconds", 0, "optional backstop poll interval in seconds (0=off; webhook is the primary path)")
 	out := fs.String("config", config.DefaultPath(), "config path to write")
 	_ = fs.Parse(args)
 
 	// No node id on an interactive terminal => run the guided wizard (mode menu).
 	if *nodeID == "" && isInteractive() {
-		runInitWizard(role, nodeID, host, region, mainURL, apiListen, token, pullBearer)
+		runInitWizard(role, nodeID, host, region, mainURL, apiListen, token, pullBearer, subBaseURL)
 	}
 	if *nodeID == "" {
 		return fmt.Errorf("--node-id is required (or run `vlr init` on a terminal for the guided setup)")
 	}
 	c := &config.Config{
-		Role:    config.Role(*role),
-		NodeID:  *nodeID,
-		Region:  *region,
-		DataDir: filepath.Join(filepath.Dir(*out), "data"),
+		Role:       config.Role(*role),
+		NodeID:     *nodeID,
+		Region:     *region,
+		SubBaseURL: strings.TrimRight(*subBaseURL, "/"),
+		DataDir:    filepath.Join(filepath.Dir(*out), "data"),
 	}
 
 	switch config.Role(*role) {
@@ -238,6 +245,16 @@ func cmdInit(args []string) error {
 		if tok, terr := util.RandHex(24); terr == nil {
 			c.APIToken = tok
 		}
+		// Auto-revoke: event-driven webhook (primary) + optional reconcile backstop.
+		if *authentikWebhookSecret != "" || (*authentikURL != "" && *authentikToken != "") {
+			c.Authentik = config.AuthentikConfig{
+				Enabled:          true,
+				WebhookSecret:    *authentikWebhookSecret,
+				APIURL:           strings.TrimRight(*authentikURL, "/"),
+				Token:            *authentikToken,
+				ReconcileSeconds: *authentikReconcile,
+			}
+		}
 		if config.Role(*role) == config.RoleChild {
 			c.Child = config.ChildConfig{
 				MainURL: *mainURL, Token: *token, PullBearer: *pullBearer,
@@ -264,9 +281,12 @@ func cmdInit(args []string) error {
 		fmt.Printf("  reality pubkey:   %s\n", c.Entry.PublicKey)
 		fmt.Printf("  reality SNI:      %s\n", c.Entry.SNI)
 		fmt.Printf("  fingerprint:      %s\n", c.Entry.Fingerprint)
+		if c.SubBaseURL != "" {
+			fmt.Printf("  подписки:         %s/base64/<token>\n", c.SubBaseURL)
+		}
 		if c.APIToken != "" {
 			fmt.Printf("  API-токен:        %s\n", c.APIToken)
-			fmt.Println("  создать юзера по API:")
+			fmt.Println("  создать юзера по API (вернёт sub_url + link + base64):")
 			fmt.Printf("    curl -fsS -XPOST http://127.0.0.1:9777/v1/users -H 'Authorization: Bearer %s' -d '{\"telegram_id\":9876567}'\n", c.APIToken)
 		}
 		fmt.Println("\nдальше:")
@@ -384,7 +404,7 @@ func cmdCascade(args []string) error {
 
 func cmdUser(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: vlr user add|rm|list|link")
+		return fmt.Errorf("usage: vlr user add|rm|list|link|rotate")
 	}
 	sub, rest := args[0], args[1:]
 	fs := newFlagSet("user")
@@ -427,6 +447,9 @@ func cmdUser(args []string) error {
 			return err
 		}
 		applyXray(c, st, *noApply)
+		if url := subscription.PublicURL(c.SubBaseURL, u); url != "" {
+			fmt.Println(url)
+		}
 		fmt.Println(subscription.Link(c.Entry, u))
 		return nil
 	case "rm":
@@ -453,10 +476,29 @@ func cmdUser(args []string) error {
 		if !ok {
 			return fmt.Errorf("user %q not found", *ref)
 		}
+		if url := subscription.PublicURL(c.SubBaseURL, u); url != "" {
+			fmt.Println("# subscription URL (import this in the client):")
+			fmt.Println(url)
+		}
 		fmt.Println("# share link:")
 		fmt.Println(subscription.Link(c.Entry, u))
 		fmt.Println("# base64 subscription:")
 		fmt.Println(subscription.Stream(c.Entry, []store.User{u}))
+		return nil
+	case "rotate":
+		if *ref == "" {
+			return fmt.Errorf("укажи ref: vlr user rotate <uuid|email|id|telegram-id>")
+		}
+		if _, err := st.RotateSubToken(*ref); err != nil {
+			return err
+		}
+		u, _ := st.FindUser(*ref)
+		fmt.Println("# rotated — old subscription URL revoked. New URL:")
+		if url := subscription.PublicURL(c.SubBaseURL, u); url != "" {
+			fmt.Println(url)
+		} else {
+			fmt.Println("(set sub_base_url in config to emit a public URL)")
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown user subcommand %q", sub)

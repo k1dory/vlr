@@ -71,8 +71,15 @@ Create a user. Body (all optional): `{"telegram_id":9876567,"id":"cust-42","emai
 — or even `{}`. `profile` is opt-in: `"vision"` = XTLS-Vision (mobile only),
 empty/omitted = plain VLESS+Reality (works on every client). Returns:
 ```json
-{ "uuid":"...", "link":"vless://...#tg9876567", "subscription":"<base64>" }
+{ "uuid":"...", "link":"vless://...#tg9876567",
+  "sub_url":"https://link.infrashark.tech/base64/9f3c1a7be04d82a6f1c05e7b2d4a8091",
+  "subscription":"<base64>" }
 ```
+`sub_url` is the ready-to-import public subscription URL — present only when
+`sub_base_url` is set in the node config (`vlr init --sub-base-url ...`). It is
+`<sub_base_url>/base64/<sub_token>`, where `sub_token` is a per-user opaque 128-bit
+token: unguessable, carries no email/UUID, and can be rotated to revoke the link
+without changing the VLESS credential (`vlr user rotate <ref>`).
 ```bash
 curl -fsS -XPOST https://node1.example.com/v1/users \
   -H "Authorization: Bearer $TOKEN" -d '{"telegram_id":9876567}'
@@ -88,11 +95,42 @@ List users (token-guarded).
 > `127.0.0.1:9777`). For public prod use, front it with TLS (the Reality :443 SNI
 > router or a reverse proxy) — do not expose `:9777` raw.
 
+### `GET /base64/<sub_token>`
+**Standalone role only. This is the public subscription URL.** Returns the
+**base64 subscription** for the user whose `sub_token` matches (import URL for
+v2rayNG/Hiddify/NekoBox). Sets `Profile-Title` and `Subscription-Userinfo`
+(`upload=<tx>; download=<rx>`) headers. The token is opaque and unguessable, so
+this path is safe to expose publicly — front it with TLS as
+`https://link.infrashark.tech/base64/<token>` (see
+`deploy/caddy/link.infrashark.tech.Caddyfile`). Unknown/disabled → `404`.
+
 ### `GET /sub/<email>`
-**Standalone role only.** Returns the **base64 subscription** for the user with
-that `email` (import URL for v2rayNG/Hiddify/NekoBox). Sets a `Profile-Title`
-header. Matches by email only — a user created without an email has no `/sub`
-path; fetch its link via `vlr user link` or the `POST /v1/users` response.
+**Standalone role only. Legacy — prefer `/base64/<token>`.** Same body, keyed by
+`email` instead of a token. Kept for backwards compatibility; email in the path is
+enumerable and leaks into proxy logs, so do not expose it publicly. A user created
+without an email has no `/sub` path.
+
+### `POST /v1/authentik/event`  (auto-revoke webhook)
+**Standalone role only. Enabled only when `authentik.enabled` and a
+`webhook_secret` are set.** Event-driven revoke: Authentik's notification rule
+POSTs here the instant a user is deactivated or deleted, and the node removes that
+portal-provisioned user (`source: authentik`) and reloads Xray. Guarded by
+`Authorization: Bearer <webhook_secret>`. Body (shaped by the Authentik body
+mapping): `{"action":"model_updated"|"model_deleted","email":"...","is_active":false}`.
+Returns `200 {"ok":true,"revoked":<bool>}` for any well-formed request (even
+unknown users — so Authentik doesn't retry-storm); `401` on a bad secret. Only
+`source: authentik` users are ever touched. See `docs/AUTHENTIK.md` §4.
+
+### `GET /me`  (subscription portal)
+**Standalone role only. Enabled only when `sub_base_url` is set.** The
+self-service portal that sits behind an Authentik forward-auth proxy. Reads the
+authenticated email from `portal_header` (default `X-Authentik-Email`), finds the
+matching user — **auto-provisioning one on first visit** (create + apply Xray) —
+and returns an HTML page with that user's personal subscription URL + Hiddify
+deep-link. No header / non-email value → `403` (and no user is created). Also
+served at `/` so the fronting vhost can proxy its root here. Per-user identity
+comes from the session, not the URL: see `docs/AUTHENTIK.md` and
+`deploy/caddy/sub.genomed-security.ru.Caddyfile`.
 
 ### `GET /healthz`
 `200 {"node":..., "cascade_up":..., "users":...}`.

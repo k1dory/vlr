@@ -1,0 +1,52 @@
+# sub.genomed-security.ru — self-service VPN subscription portal, gated by Authentik.
+#
+# This vhost is imported into the EDGE Caddy (the same one that fronts Authentik,
+# NetBird and the help portal — see Genomed SSO docs). Flow:
+#
+#   employee -> https://sub.genomed-security.ru
+#            -> EDGE Caddy forward_auth to the Authentik embedded outpost
+#            -> on success Caddy injects X-Authentik-Email and proxies to the vlr
+#               node's portal (GET /me), which finds or AUTO-CREATES that user and
+#               renders their personal subscription link.
+#
+# Per-user-ness comes from the authenticated session, NOT from the URL — the same
+# tile URL is shown to everyone, and disabling the user in Authentik removes access.
+#
+# TWO HOSTS: Authentik lives on EDGE (docker "edge" network, container
+# authentik-server:9000). The vlr portal runs on the RU VPN node, reachable from
+# EDGE only over the management link (NetBird / WireGuard / private VLAN) — NEVER
+# over the public internet. Replace VLR_NODE_ADDR below with that private address.
+#
+# Prereqs in Authentik (see docs/AUTHENTIK.md):
+#   - a Proxy Provider (Forward auth, single application) for this domain,
+#   - an Application "Личный VPN" whose launch URL is https://sub.genomed-security.ru,
+#   - the provider added to the authentik Embedded Outpost.
+#
+# The vlr node must run with  sub_base_url  set (vlr init --sub-base-url ...).
+
+sub.genomed-security.ru {
+	encode gzip
+
+	# Authentik's own outpost endpoints must reach the outpost unauthenticated.
+	handle /outpost.goauthentik.io/* {
+		reverse_proxy authentik-server:9000
+	}
+
+	handle {
+		# 1) Authenticate against the Authentik embedded outpost.
+		forward_auth authentik-server:9000 {
+			uri /outpost.goauthentik.io/auth/caddy
+			# Copy the identity headers from the outpost response onto the upstream
+			# request. This OVERWRITES anything the client sent, so X-Authentik-Email
+			# cannot be spoofed by the browser.
+			copy_headers X-Authentik-Username X-Authentik-Email X-Authentik-Groups
+		}
+
+		# 2) Send the authenticated request to the vlr portal on the RU node. The
+		# path is irrelevant — rewrite to /me so the portal handler always runs.
+		rewrite * /me
+		reverse_proxy VLR_NODE_ADDR:9777 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+}

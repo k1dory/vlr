@@ -25,8 +25,9 @@ type createUserReq struct {
 
 type createUserResp struct {
 	UUID         string `json:"uuid"`
-	Link         string `json:"link"`
-	Subscription string `json:"subscription"` // base64
+	Link         string `json:"link"`              // vless:// share link
+	SubURL       string `json:"sub_url,omitempty"` // public https://.../base64/<token> (if SubBaseURL set)
+	Subscription string `json:"subscription"`      // raw base64 body
 }
 
 // registerUserAPI mounts the token-guarded user endpoints on mux:
@@ -108,6 +109,7 @@ func createUser(w http.ResponseWriter, r *http.Request, cfg *config.Config, st *
 	writeJSON(w, http.StatusCreated, createUserResp{
 		UUID:         u.UUID,
 		Link:         subscription.Link(cfg.Entry, u),
+		SubURL:       subscription.PublicURL(cfg.SubBaseURL, u),
 		Subscription: subscription.Stream(cfg.Entry, []store.User{u}),
 	})
 }

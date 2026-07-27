@@ -1,0 +1,30 @@
+# link.infrashark.tech — public front for the vlr subscription endpoint.
+#
+# The vlr node serves its subscription on 127.0.0.1:9777 (child.pull_listen).
+# This Caddyfile exposes ONLY the public subscription path /base64/<token> to the
+# internet and gives it a real TLS cert. Everything else on the node — the
+# token-guarded /v1/users API, the legacy /sub/<email> path, /healthz — is NOT
+# proxied, so it stays reachable only from localhost / the management network.
+#
+# Deploy: drop this into /etc/caddy/ (or `import` it from the main Caddyfile),
+# point DNS A/AAAA of link.infrashark.tech at this host, `caddy reload`.
+# Then set  "sub_base_url": "https://link.infrashark.tech"  in the node config
+# (or run `vlr init --sub-base-url https://link.infrashark.tech`).
+
+link.infrashark.tech {
+	encode gzip
+
+	# Only the opaque-token subscription path is public.
+	@sub path /base64/*
+	handle @sub {
+		reverse_proxy 127.0.0.1:9777 {
+			# Pass the client's real IP through for the node's logs.
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	# Anything else returns 404 without touching the node — do not leak the API.
+	handle {
+		respond "not found" 404
+	}
+}

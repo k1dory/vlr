@@ -13,18 +13,38 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/k1dory/vlr/internal/util"
 )
+
+// subTokenBytes is the entropy of a subscription token: 16 bytes = 128 bits,
+// rendered as 32 hex chars. Unguessable, safe to place in a URL path.
+const subTokenBytes = 16
+
+// SourceAuthentik marks users provisioned by the SSO portal. The Authentik
+// reconcile loop auto-revokes exactly these when they are deactivated upstream.
+const SourceAuthentik = "authentik"
 
 // User is one VPN client provisioned on a node.
 type User struct {
-	UUID       string    `json:"uuid"`        // VLESS id — the stable identity
-	Email      string    `json:"email"`       // optional label
-	TelegramID int64     `json:"telegram_id"` // optional owner's Telegram user id
-	ExternalID string    `json:"external_id"` // optional external/system id
-	ShortID    string    `json:"short_id"`    // Reality short id handed to this user
-	Profile    string    `json:"profile"`     // "vision" = XTLS-Vision (mobile); empty = plain Reality
-	CreatedAt  time.Time `json:"created_at"`
-	Enabled    bool      `json:"enabled"`
+	UUID       string `json:"uuid"`        // VLESS id — the stable identity
+	Email      string `json:"email"`       // optional label
+	TelegramID int64  `json:"telegram_id"` // optional owner's Telegram user id
+	ExternalID string `json:"external_id"` // optional external/system id
+	ShortID    string `json:"short_id"`    // Reality short id handed to this user
+	Profile    string `json:"profile"`     // "vision" = XTLS-Vision (mobile); empty = plain Reality
+	// SubToken is the opaque, unguessable identifier that names this user's public
+	// subscription URL (https://<sub_base_url>/base64/<sub_token>). It is NOT the
+	// VLESS secret: it can be rotated (RotateSubToken) to revoke the share link
+	// without touching the UUID, and it keeps email/UUID out of proxy logs.
+	SubToken string `json:"sub_token"`
+	// Source records who provisioned this user, so lifecycle automation only
+	// touches what it owns. SourceAuthentik = created by the SSO portal and subject
+	// to the Authentik reconcile (auto-revoked when deactivated upstream); empty =
+	// created manually / via API and never auto-removed.
+	Source    string    `json:"source"`
+	CreatedAt time.Time `json:"created_at"`
+	Enabled   bool      `json:"enabled"`
 	// RxBytes/TxBytes are the last-known per-user counters (filled by the stats
 	// poller against Xray's stats API). Monotonic within a node lifetime.
 	RxBytes int64 `json:"rx_bytes"`
@@ -65,6 +85,26 @@ func Open(dataDir string) (*Store, error) {
 	if err := json.Unmarshal(b, &s.st); err != nil {
 		return nil, fmt.Errorf("parse state: %w", err)
 	}
+	// Backfill subscription tokens for users created before sub_token existed, so
+	// every user has a public /base64/<token> URL. Persist only if we changed
+	// something (don't bump ConfigVersion — a token is node-local, not a data-plane
+	// change the main needs to pull).
+	changed := false
+	for i := range s.st.Users {
+		if s.st.Users[i].SubToken == "" {
+			tok, err := util.RandHex(subTokenBytes)
+			if err != nil {
+				return nil, fmt.Errorf("gen sub token: %w", err)
+			}
+			s.st.Users[i].SubToken = tok
+			changed = true
+		}
+	}
+	if changed {
+		if err := s.flushLocked(); err != nil {
+			return nil, fmt.Errorf("persist backfilled tokens: %w", err)
+		}
+	}
 	return s, nil
 }
 
@@ -96,6 +136,13 @@ func (s *Store) AddUser(u User) error {
 	if u.CreatedAt.IsZero() {
 		u.CreatedAt = time.Now().UTC()
 	}
+	if u.SubToken == "" {
+		tok, err := util.RandHex(subTokenBytes)
+		if err != nil {
+			return fmt.Errorf("gen sub token: %w", err)
+		}
+		u.SubToken = tok
+	}
 	u.Enabled = true
 	s.st.Users = append(s.st.Users, u)
 	s.st.ConfigVersion++
@@ -123,6 +170,44 @@ func (s *Store) FindUser(ref string) (User, bool) {
 		}
 	}
 	return User{}, false
+}
+
+// FindBySubToken returns the user whose subscription token equals tok. An empty
+// tok never matches — a user with no token must never be reachable by "".
+func (s *Store) FindBySubToken(tok string) (User, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if tok == "" {
+		return User{}, false
+	}
+	for _, u := range s.st.Users {
+		if u.SubToken == tok {
+			return u, true
+		}
+	}
+	return User{}, false
+}
+
+// RotateSubToken issues a fresh subscription token for the user matching ref,
+// revoking the old /base64/<token> URL. The VLESS credential (UUID) is untouched,
+// so the user keeps working once they re-import the new link. Returns the new token.
+func (s *Store) RotateSubToken(ref string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.st.Users {
+		if matchRef(s.st.Users[i], ref) {
+			tok, err := util.RandHex(subTokenBytes)
+			if err != nil {
+				return "", fmt.Errorf("gen sub token: %w", err)
+			}
+			s.st.Users[i].SubToken = tok
+			if err := s.flushLocked(); err != nil {
+				return "", err
+			}
+			return tok, nil
+		}
+	}
+	return "", fmt.Errorf("user %q not found", ref)
 }
 
 // RemoveUser deletes the user matching ref and bumps ConfigVersion.

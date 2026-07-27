@@ -44,15 +44,24 @@ func NewStandalone(cfg *config.Config, st *store.Store, log *slog.Logger, stats 
 // running the local monitor loop.
 func (s *Standalone) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
-	// GET /sub/<email> -> base64 subscription for that user.
+	// GET /base64/<sub_token> -> base64 subscription for that user. This is the
+	// public, unguessable URL fronted by link.infrashark.tech; the token carries
+	// no email/UUID so it is safe in proxy logs and can be rotated to revoke.
+	mux.HandleFunc("/base64/", func(w http.ResponseWriter, r *http.Request) {
+		tok := r.URL.Path[len("/base64/"):]
+		if u, ok := s.store.FindBySubToken(tok); ok && u.Enabled {
+			s.writeSubscription(w, u)
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+	// GET /sub/<email> -> same body, kept for backwards compatibility. Prefer
+	// /base64/<token>: email in the path is enumerable and leaks into logs.
 	mux.HandleFunc("/sub/", func(w http.ResponseWriter, r *http.Request) {
 		email := r.URL.Path[len("/sub/"):]
 		for _, u := range s.store.Users() {
 			if u.Email == email && u.Enabled {
-				body := subscription.Stream(s.cfg.Entry, []store.User{u})
-				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-				w.Header().Set("Profile-Title", "VLR "+s.cfg.Region)
-				_, _ = w.Write([]byte(body))
+				s.writeSubscription(w, u)
 				return
 			}
 		}
@@ -68,9 +77,22 @@ func (s *Standalone) Run(ctx context.Context) error {
 	})
 	// Token-guarded user API (POST/DELETE /v1/users) — prod automation.
 	registerUserAPI(mux, s.cfg, s.store, s.log)
+	// Event-driven auto-revoke: Authentik POSTs here on user deactivation/deletion.
+	registerAuthentikWebhook(mux, s.cfg, s.store, s.log)
+	// Self-service portal (GET /me), behind Authentik forward-auth. No-op unless
+	// SubBaseURL is set. Registers "/" as the vhost root, so keep it last.
+	registerPortal(mux, s.cfg, s.store, s.log)
 
 	srv := &http.Server{Addr: subListen(s.cfg), Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go s.monitorLoop(ctx)
+	// Optional reconcile backstop (off unless a poll interval + API creds are set).
+	// The webhook is the real-time path; this only catches missed events.
+	if s.cfg.Authentik.Enabled && s.cfg.Authentik.ReconcileSeconds > 0 &&
+		s.cfg.Authentik.APIURL != "" && s.cfg.Authentik.Token != "" {
+		r := newAuthentikReconciler(s.cfg, s.store, s.log)
+		go r.run(ctx)
+		s.log.Info("authentik reconcile backstop enabled", "every_s", s.cfg.Authentik.ReconcileSeconds)
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -84,6 +106,18 @@ func (s *Standalone) Run(ctx context.Context) error {
 		return fmt.Errorf("subscription server: %w", err)
 	}
 	return nil
+}
+
+// writeSubscription emits the base64 subscription for one user, plus the headers
+// mainstream clients (v2rayNG/Hiddify/NekoBox) read: Profile-Title names the
+// profile, Subscription-Userinfo shows this user's up/down counters.
+func (s *Standalone) writeSubscription(w http.ResponseWriter, u store.User) {
+	body := subscription.Stream(s.cfg.Entry, []store.User{u})
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Profile-Title", "VLR "+s.cfg.Region)
+	w.Header().Set("Subscription-Userinfo",
+		fmt.Sprintf("upload=%d; download=%d", u.TxBytes, u.RxBytes))
+	_, _ = w.Write([]byte(body))
 }
 
 func (s *Standalone) monitorLoop(ctx context.Context) {

@@ -59,7 +59,7 @@ func askSecret(label string) string {
 
 // runInitWizard fills the init parameters interactively. It returns the role and
 // mutates the provided pointers for the values the chosen role needs.
-func runInitWizard(role, nodeID, host, region, mainURL, apiListen, token, pullBearer *string) {
+func runInitWizard(role, nodeID, host, region, mainURL, apiListen, token, pullBearer, subBaseURL *string) {
 	fmt.Print(`
 ========================================
    vlr — настройка узла
@@ -101,6 +101,7 @@ func runInitWizard(role, nodeID, host, region, mainURL, apiListen, token, pullBe
 	case "standalone", "child":
 		*region = ask("Регион (метка, напр. RU/Yandex)", *region)
 		*host = ask("Публичный адрес (IP/домен), пусто = автоопределение", "")
+		*subBaseURL = ask("Домен подписок (напр. https://link.infrashark.tech), пусто = не выдавать URL", *subBaseURL)
 		if *role == "child" {
 			*mainURL = ask("URL main-сервера (напр. https://main:8443/v1)", *mainURL)
 			*token = ask("Токен узла для heartbeat", "")

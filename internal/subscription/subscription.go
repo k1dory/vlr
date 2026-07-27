@@ -71,6 +71,20 @@ func userLabel(u store.User) string {
 	}
 }
 
+// PublicURL renders the public, ready-to-import subscription URL for a user:
+//
+//	https://link.infrashark.tech/base64/<sub_token>
+//
+// baseURL is cfg.SubBaseURL (a trailing slash is tolerated). Returns "" when
+// either the base URL or the user's token is missing, so callers can treat an
+// empty result as "no public URL configured" and fall back to the raw base64.
+func PublicURL(baseURL string, u store.User) string {
+	if baseURL == "" || u.SubToken == "" {
+		return ""
+	}
+	return strings.TrimRight(baseURL, "/") + "/base64/" + u.SubToken
+}
+
 // Stream builds the base64 subscription body for a set of users on one entry.
 // The body is the standard base64 (std alphabet) of the joined links, which is
 // the format every mainstream client expects from a subscription URL.
