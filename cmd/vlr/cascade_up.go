@@ -229,20 +229,28 @@ func cmdCascadeUp(args []string) error {
 		"iface": *iface, "key_path": *euKey,
 	})
 
-	// 5. Confirm handshake, then healthcheck through the cascade.
-	time.Sleep(2 * time.Second)
-	up, _ := (cascade.WGMonitor{Interface: *iface, Tool: "awg"}).Healthy(ctx)
-	if !up {
-		fmt.Println("⚠ нет свежего AmneziaWG-handshake — проверь, что EU слушает порт и доступен")
-	} else {
-		fmt.Println("✓ AmneziaWG handshake есть")
+	// Give the peer time to respond; a missing handshake must not look like
+	// successful provisioning or lead to minutes of doomed site probes.
+	fmt.Println("==> ожидаю AmneziaWG-handshake (до 20 секунд)")
+	handshakeCtx, handshakeCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer handshakeCancel()
+	mon := cascade.WGMonitor{Interface: *iface, Tool: "awg"}
+	if err := cascade.WaitHealthy(handshakeCtx, mon.Healthy); err != nil {
+		return fmt.Errorf("туннель настроен, но handshake не получен: %w; проверь UDP %d на EU и Security Group, затем awg show %s", err, *wgPort, *iface)
+	}
+	fmt.Println("✓ AmneziaWG handshake есть")
+	if err := refreshCascadeDaemon(savePath); err != nil {
+		return err
 	}
 	if *skipCheck {
 		return nil
 	}
 	fmt.Println("\n==> проверка через каскад:")
-	results := cascade.Healthcheck(ctx, *iface, nil, *timeout)
-	fmt.Print(cascade.FormatResults(results))
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer checkCancel()
+	results := cascade.HealthcheckProgress(checkCtx, *iface, nil, *timeout, func(r cascade.SiteResult) {
+		fmt.Print(cascade.FormatResults([]cascade.SiteResult{r}))
+	})
 	fail := 0
 	for _, r := range results {
 		if !r.OK {
@@ -285,9 +293,8 @@ func ensurePackage(ctx context.Context, checkBin string, pkgByMgr map[string]str
 		fmt.Printf("==> ставлю %s (%s)\n", pkg, checkBin)
 		run := func(args []string) error {
 			c := exec.CommandContext(ctx, m.bin, args...)
-			c.Stdout, c.Stderr = os.Stdout, os.Stderr
 			c.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
-			return c.Run()
+			return runInstallLogged(c)
 		}
 		ins := append(append([]string{}, m.insFlags...), pkg)
 		if run(ins) != nil && m.updateCmd != nil {
@@ -310,8 +317,8 @@ func ensureSshpass(ctx context.Context) (bool, error) {
 func ensureAmneziaWG(ctx context.Context) (bool, error) {
 	_, missing := exec.LookPath("awg")
 	cmd := exec.CommandContext(ctx, "bash", "-ec", cascade.AWGInstallScript)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
+	fmt.Println("==> проверяю AmneziaWG; установка может занять несколько минут")
+	if err := runInstallLogged(cmd); err != nil {
 		return false, fmt.Errorf("install AmneziaWG: %w", err)
 	}
 	return missing != nil, nil
@@ -374,8 +381,9 @@ func cmdCascadeCheck(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	results := cascade.Healthcheck(ctx, c.Cascade.Interface, sites, *timeout)
-	fmt.Print(cascade.FormatResults(results))
+	results := cascade.HealthcheckProgress(ctx, c.Cascade.Interface, sites, *timeout, func(r cascade.SiteResult) {
+		fmt.Print(cascade.FormatResults([]cascade.SiteResult{r}))
+	})
 	for _, r := range results {
 		if !r.OK {
 			return fmt.Errorf("some sites unreachable through the cascade")

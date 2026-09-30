@@ -17,6 +17,17 @@ systems install `awg`, `awg-quick` and the AmneziaWG kernel module or
 `amneziawg-go` beforehand. Reference:
 https://github.com/amnezia-vpn/amneziawg-linux-kernel-module#installation
 
+
+The EU config opens its AWG UDP listen port in INPUT and installs forwarding
+rules before existing firewall chains. These rules are scoped to the port and
+tunnel, are restored on interface startup, and removed on shutdown. Existing
+SSH and web firewall rules are left in place.
+
+Installation output is saved to a private `vlr-install-*.log` file; the CLI shows
+its path and a bounded error excerpt on failure. Cascade setup waits up to
+20 seconds for a handshake before probing sites, prints each probe result as
+it finishes, and refreshes an active `vlr` daemon using the same config file.
+
 ## Transport
 
 New cascades use AmneziaWG, retaining UDP/HTTP3 support and adding configurable

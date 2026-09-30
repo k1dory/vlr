@@ -15,6 +15,10 @@ func TestBuildExitScript(t *testing.T) {
 		WAN: "", RUPublicKey: "RUPUBKEYBASE64=", RUTunnelIP: "10.66.0.2",
 	})
 	musts := []string{
+		"iptables -I INPUT 1 -p udp --dport 51820",    // handshake through an existing default-drop firewall
+		"iptables -D INPUT -p udp --dport 51820",      // remove exception on shutdown
+		"iptables -I FORWARD 1 -i %i -s 10.66.0.2/32", // tunnel before existing firewall chains
+		"-m conntrack --ctstate RELATED,ESTABLISHED",  // only reply traffic may return
 		"awg genkey",                  // EU generates its own key
 		"ListenPort = 51820",          // port wired
 		"AllowedIPs = 10.66.0.2/32",   // forward-only: only the RU peer

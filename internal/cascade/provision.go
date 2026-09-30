@@ -112,8 +112,14 @@ Address = {{ADDR}}
 PrivateKey = $EU_PRIV
 ListenPort = {{PORT}}
 {{AWG}}
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $WAN -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $WAN -j MASQUERADE
+PostUp = iptables -I INPUT 1 -p udp --dport {{PORT}} -m comment --comment vlr-%i -j ACCEPT
+PostUp = iptables -I FORWARD 1 -i %i -s {{RU_IP}}/32 -o $WAN -j ACCEPT
+PostUp = iptables -I FORWARD 1 -i $WAN -o %i -d {{RU_IP}}/32 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -s {{RU_IP}}/32 -o $WAN -j MASQUERADE
+PostDown = iptables -D INPUT -p udp --dport {{PORT}} -m comment --comment vlr-%i -j ACCEPT
+PostDown = iptables -D FORWARD -i %i -s {{RU_IP}}/32 -o $WAN -j ACCEPT
+PostDown = iptables -D FORWARD -i $WAN -o %i -d {{RU_IP}}/32 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -s {{RU_IP}}/32 -o $WAN -j MASQUERADE
 
 [Peer]
 PublicKey = {{RU_PUB}}
@@ -258,6 +264,11 @@ type SiteResult struct {
 // interface, so a green result proves the RU->EU->internet path works (not just
 // the RU node's own connectivity). timeout is per-site.
 func Healthcheck(ctx context.Context, iface string, sites []string, timeout time.Duration) []SiteResult {
+	return HealthcheckProgress(ctx, iface, sites, timeout, nil)
+}
+
+// HealthcheckProgress reports each completed probe without waiting for the rest.
+func HealthcheckProgress(ctx context.Context, iface string, sites []string, timeout time.Duration, progress func(SiteResult)) []SiteResult {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
@@ -266,7 +277,11 @@ func Healthcheck(ctx context.Context, iface string, sites []string, timeout time
 	}
 	results := make([]SiteResult, 0, len(sites))
 	for _, host := range sites {
-		results = append(results, probeSite(ctx, iface, host, timeout))
+		result := probeSite(ctx, iface, host, timeout)
+		results = append(results, result)
+		if progress != nil {
+			progress(result)
+		}
 	}
 	return results
 }

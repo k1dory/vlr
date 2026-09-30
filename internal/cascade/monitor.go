@@ -5,6 +5,7 @@ package cascade
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -20,6 +21,27 @@ type WGMonitor struct {
 	Tool      string
 	// MaxAge is how stale the last handshake may be before unhealthy.
 	MaxAge time.Duration
+}
+
+// WaitHealthy retries until the peer responds or the caller's deadline expires.
+// A command error is returned immediately rather than hidden as a timeout.
+func WaitHealthy(ctx context.Context, check func(context.Context) (bool, error)) error {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		up, err := check(ctx)
+		if err != nil {
+			return err
+		}
+		if up {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for handshake: %w", ctx.Err())
+		case <-t.C:
+		}
+	}
 }
 
 // Healthy returns true if the most recent handshake on the interface is within
