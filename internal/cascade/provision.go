@@ -3,15 +3,18 @@ package cascade
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/k1dory/vlr/internal/config"
 )
 
 // This file automates the cascade the way Genomed-mtproto's `mtg kaskad` did:
 // from the RU entry node, one command provisions the EU exit over SSH and brings
-// up the WireGuard tunnel. The EU side is "forward-only" — it generates its own
+// up the AmneziaWG tunnel. The EU side is "forward-only" — it generates its own
 // private key (which never leaves the box), only accepts the RU peer's tunnel IP,
 // and only masquerades traffic out (no shell, no general routing). WireGuard
 // replaces mtg's autossh SOCKS tunnel, so there is no persistent SSH at all:
@@ -28,6 +31,8 @@ type SSHOpts struct {
 
 // ExitProvisionParams parameterises the remote EU bootstrap script.
 type ExitProvisionParams struct {
+	AWG         *config.AWGConfig
+	Autostart   bool
 	Iface       string // wg-cascade
 	EUAddress   string // EU tunnel addr with mask, e.g. 10.66.0.1/24
 	WGPort      int    // EU WireGuard listen port (RU endpoint points here)
@@ -37,11 +42,22 @@ type ExitProvisionParams struct {
 }
 
 // BuildExitScript renders the idempotent bash script run on the EU exit. It
-// installs WireGuard if missing, generates EU keys locally, writes a forward-only
+// installs AmneziaWG if missing, generates EU keys locally, writes a forward-only
 // exit config and brings it up, then prints "VLR_EU_PUBKEY=<pub>" for the caller.
 // Pure function — unit-tested, no I/O.
 func BuildExitScript(p ExitProvisionParams) string {
+	autostart := "disable"
+	if p.Autostart {
+		autostart = "enable"
+	}
+	awg := ""
+	if p.AWG != nil {
+		awg = p.AWG.Render()
+	}
 	r := strings.NewReplacer(
+		"{{INSTALL}}", AWGInstallScript,
+		"{{AWG}}", awg,
+		"{{AUTOSTART}}", autostart,
 		"{{IFACE}}", p.Iface,
 		"{{ADDR}}", p.EUAddress,
 		"{{PORT}}", fmt.Sprintf("%d", p.WGPort),
@@ -55,10 +71,18 @@ func BuildExitScript(p ExitProvisionParams) string {
 const exitScriptTemplate = `set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-if ! command -v wg >/dev/null 2>&1; then
-  echo ">> installing wireguard"
-  (apt-get update -qq && apt-get install -y -qq wireguard iptables) >/dev/null
+umask 077
+{{INSTALL}}
+if ! command -v iptables >/dev/null; then
+  apt-get install -y iptables
 fi
+# Stop the old interface before replacing its config, so PostDown uses old rules.
+if [ -f /etc/wireguard/{{IFACE}}.conf ]; then
+  systemctl disable --now wg-quick@{{IFACE}}
+  wg-quick down {{IFACE}} >/dev/null 2>&1 || true
+fi
+systemctl stop awg-quick@{{IFACE}} || true
+awg-quick down {{IFACE}} >/dev/null 2>&1 || true
 
 WAN="{{WAN}}"
 if [ -z "$WAN" ]; then
@@ -66,23 +90,28 @@ if [ -z "$WAN" ]; then
 fi
 [ -n "$WAN" ] || { echo "could not detect WAN interface" >&2; exit 1; }
 
-mkdir -p /etc/wireguard && chmod 700 /etc/wireguard
-if [ ! -f /etc/wireguard/{{IFACE}}.key ]; then
-  umask 077
-  wg genkey | tee /etc/wireguard/{{IFACE}}.key | wg pubkey > /etc/wireguard/{{IFACE}}.pub
+mkdir -p /etc/amnezia/amneziawg && chmod 700 /etc/amnezia/amneziawg
+if [ ! -f /etc/amnezia/amneziawg/{{IFACE}}.key ]; then
+  if [ -f /etc/wireguard/{{IFACE}}.key ]; then
+    cp /etc/wireguard/{{IFACE}}.key /etc/amnezia/amneziawg/{{IFACE}}.key
+  else
+    awg genkey > /etc/amnezia/amneziawg/{{IFACE}}.key
+  fi
 fi
-EU_PRIV="$(cat /etc/wireguard/{{IFACE}}.key)"
-EU_PUB="$(cat /etc/wireguard/{{IFACE}}.pub)"
+awg pubkey < /etc/amnezia/amneziawg/{{IFACE}}.key > /etc/amnezia/amneziawg/{{IFACE}}.pub
+EU_PRIV="$(cat /etc/amnezia/amneziawg/{{IFACE}}.key)"
+EU_PUB="$(cat /etc/amnezia/amneziawg/{{IFACE}}.pub)"
 
 sysctl -wq net.ipv4.ip_forward=1
 grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
 
-cat > /etc/wireguard/{{IFACE}}.conf <<EOF
+cat > /etc/amnezia/amneziawg/{{IFACE}}.conf <<EOF
 # vlr cascade — EU exit (forward-only: NAT out, only the RU peer allowed)
 [Interface]
 Address = {{ADDR}}
 PrivateKey = $EU_PRIV
 ListenPort = {{PORT}}
+{{AWG}}
 PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $WAN -j MASQUERADE
 PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $WAN -j MASQUERADE
 
@@ -90,26 +119,42 @@ PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACC
 PublicKey = {{RU_PUB}}
 AllowedIPs = {{RU_IP}}/32
 EOF
-chmod 600 /etc/wireguard/{{IFACE}}.conf
+chmod 600 /etc/amnezia/amneziawg/{{IFACE}}.conf
 
-systemctl enable wg-quick@{{IFACE}} >/dev/null 2>&1 || true
-wg-quick down {{IFACE}} >/dev/null 2>&1 || true
-wg-quick up {{IFACE}}
+systemctl {{AUTOSTART}} awg-quick@{{IFACE}}
+systemctl start awg-quick@{{IFACE}}
 
 echo "VLR_EU_PUBKEY=$EU_PUB"
 `
 
-// ProvisionExit runs the EU bootstrap over SSH and returns the EU WireGuard
+// ProvisionExit runs the EU bootstrap over SSH and returns the EU AmneziaWG
 // public key captured from the script output.
 func ProvisionExit(ctx context.Context, ssh SSHOpts, p ExitProvisionParams) (euPubKey string, err error) {
+	if err := ValidateExitParams(p); err != nil {
+		return "", err
+	}
+	if raw, err := base64.StdEncoding.DecodeString(p.RUPublicKey); err != nil || len(raw) != 32 {
+		return "", fmt.Errorf("invalid RU public key")
+	}
+	if err := p.AWG.Validate(); err != nil {
+		return "", err
+	}
 	script := BuildExitScript(p)
-	out, err := runSSH(ctx, ssh, "bash -s", script)
+	remoteCmd := "bash -s"
+	if ssh.User != "root" {
+		remoteCmd = "sudo -n bash -s"
+	}
+	out, err := runSSH(ctx, ssh, remoteCmd, script)
 	if err != nil {
 		return "", fmt.Errorf("EU provisioning failed: %w\n%s", err, out)
 	}
 	for line := range strings.SplitSeq(out, "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "VLR_EU_PUBKEY="); ok {
-			return strings.TrimSpace(v), nil
+			key := strings.TrimSpace(v)
+			if raw, err := base64.StdEncoding.DecodeString(key); err != nil || len(raw) != 32 {
+				return "", fmt.Errorf("invalid EU public key")
+			}
+			return key, nil
 		}
 	}
 	return "", fmt.Errorf("EU public key not found in output:\n%s", out)
@@ -122,11 +167,21 @@ func TeardownExit(ctx context.Context, ssh SSHOpts, iface string) (string, error
 	if iface == "" {
 		iface = "wg-cascade"
 	}
+	if !interfaceName.MatchString(iface) || iface == "." || iface == ".." {
+		return "", fmt.Errorf("invalid tunnel interface name")
+	}
 	script := strings.NewReplacer("{{IFACE}}", iface).Replace(exitTeardownTemplate)
-	return runSSH(ctx, ssh, "bash -s", script)
+	remoteCmd := "bash -s"
+	if ssh.User != "root" {
+		remoteCmd = "sudo -n bash -s"
+	}
+	return runSSH(ctx, ssh, remoteCmd, script)
 }
 
 const exitTeardownTemplate = `set -uo pipefail
+awg-quick down {{IFACE}} 2>/dev/null || true
+systemctl disable --now awg-quick@{{IFACE}} 2>/dev/null || true
+rm -f /etc/amnezia/amneziawg/{{IFACE}}.conf /etc/amnezia/amneziawg/{{IFACE}}.key /etc/amnezia/amneziawg/{{IFACE}}.pub
 wg-quick down {{IFACE}} 2>/dev/null || true
 systemctl disable wg-quick@{{IFACE}} 2>/dev/null || true
 rm -f /etc/wireguard/{{IFACE}}.conf /etc/wireguard/{{IFACE}}.key /etc/wireguard/{{IFACE}}.pub
@@ -218,7 +273,7 @@ func Healthcheck(ctx context.Context, iface string, sites []string, timeout time
 
 func probeSite(ctx context.Context, iface, host string, timeout time.Duration) SiteResult {
 	args := []string{
-		"-sS", "-o", "/dev/null",
+		"-4", "-sS", "-o", "/dev/null",
 		"-w", "%{http_code}",
 		"--max-time", fmt.Sprintf("%d", int(timeout.Seconds())),
 	}

@@ -89,6 +89,12 @@ func RenderEntry(c *config.Config) (string, error) {
 	fmt.Fprintf(&b, "Address = %s\n", w.Address)
 	fmt.Fprintf(&b, "PrivateKey = %s\n", w.PrivateKey)
 	fmt.Fprintf(&b, "MTU = %d\n", mtu)
+	if w.Transport == "awg" {
+		if err := w.AWG.Validate(); err != nil {
+			return "", err
+		}
+		b.WriteString(w.AWG.Render())
+	}
 	if w.ListenPort != 0 {
 		fmt.Fprintf(&b, "ListenPort = %d\n", w.ListenPort)
 	}
@@ -102,7 +108,10 @@ func RenderEntry(c *config.Config) (string, error) {
 	fw := config.CascadeFwmark
 	fmt.Fprintf(&b, "Table = off\n")
 	fmt.Fprintf(&b, "PostUp = ip route add default dev %%i table %d; ip rule add fwmark %d table %d\n", fw, fw, fw)
-	fmt.Fprintf(&b, "PostDown = ip rule del fwmark %d table %d 2>/dev/null || true\n\n", fw, fw)
+	// curl --interface probes are unmarked but explicitly bound to this device.
+	fmt.Fprintf(&b, "PostUp = ip rule add oif %%i table %d\n", fw)
+	fmt.Fprintf(&b, "PostDown = ip rule del fwmark %d table %d 2>/dev/null || true\n", fw, fw)
+	fmt.Fprintf(&b, "PostDown = ip rule del oif %%i table %d 2>/dev/null || true\n\n", fw)
 	fmt.Fprintf(&b, "[Peer]\n")
 	fmt.Fprintf(&b, "# EU exit (Aeza)\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", w.ExitPublicKey)

@@ -385,7 +385,7 @@ func cmdCascade(args []string) error {
 		if err != nil {
 			return err
 		}
-		mon := cascade.WGMonitor{Interface: c.Cascade.Interface}
+		mon := cascade.WGMonitor{Interface: c.Cascade.Interface, Tool: c.Cascade.Tool()}
 		up, err := mon.Healthy(context.Background())
 		if err != nil {
 			return fmt.Errorf("cascade test: %w", err)
@@ -682,7 +682,7 @@ func cmdServe(args []string) error {
 
 func pickMonitor(c *config.Config) daemon.CascadeMonitor {
 	if c.Cascade.Enabled && c.Cascade.Interface != "" {
-		return cascade.WGMonitor{Interface: c.Cascade.Interface}
+		return cascade.WGMonitor{Interface: c.Cascade.Interface, Tool: c.Cascade.Tool()}
 	}
 	return cascade.NoopMonitor{}
 }

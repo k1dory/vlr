@@ -17,6 +17,7 @@ import (
 // handshake. It shells out to `wg show <iface> latest-handshakes` (Linux nodes).
 type WGMonitor struct {
 	Interface string
+	Tool      string
 	// MaxAge is how stale the last handshake may be before unhealthy.
 	MaxAge time.Duration
 }
@@ -28,7 +29,11 @@ func (m WGMonitor) Healthy(ctx context.Context) (bool, error) {
 	if maxAge == 0 {
 		maxAge = 3 * time.Minute
 	}
-	out, err := exec.CommandContext(ctx, "wg", "show", m.Interface, "latest-handshakes").Output()
+	tool := m.Tool
+	if tool == "" {
+		tool = "wg"
+	}
+	out, err := exec.CommandContext(ctx, tool, "show", m.Interface, "latest-handshakes").Output()
 	if err != nil {
 		return false, err
 	}

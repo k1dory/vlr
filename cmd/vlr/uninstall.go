@@ -210,6 +210,9 @@ func cmdUninstall(args []string) error {
 	// C. local WireGuard interfaces.
 	for _, i := range ifaces {
 		step("опускаю локальный туннель " + i)
+		sys("awg-quick", "down", i)
+		sys("systemctl", "disable", "--now", "awg-quick@"+i)
+		rmf("/etc/amnezia/amneziawg/" + i + ".conf")
 		sys("wg-quick", "down", i)
 		sys("systemctl", "disable", "wg-quick@"+i)
 		// best-effort: remove the cascade policy rule if it lingered.

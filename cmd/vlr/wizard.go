@@ -21,6 +21,23 @@ func isInteractive() bool {
 
 var stdinReader = bufio.NewReader(os.Stdin)
 
+func askBool(label string, def bool) bool {
+	value := "нет"
+	if def {
+		value = "да"
+	}
+	for {
+		switch strings.ToLower(ask(label+" (да/нет)", value)) {
+		case "да", "д", "yes", "y", "1", "true":
+			return true
+		case "нет", "н", "no", "n", "2", "0", "false":
+			return false
+		default:
+			fmt.Println("Введите да или нет.")
+		}
+	}
+}
+
 // ask prints a label and returns the trimmed line. def is shown and returned on
 // an empty answer.
 func ask(label, def string) string {

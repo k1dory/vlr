@@ -2,7 +2,7 @@
 
 `vlr` is a single static Go binary that runs a VPN node built on **VLESS + Reality
 + XTLS-Vision**, cascading traffic from a **RU entry** (Yandex Cloud) to an **EU
-exit** (Aeza) over **WireGuard**, and streaming each client's access config into
+exit** (Aeza) over **AmneziaWG**, and streaming each client's access config into
 a **base64 subscription link**.
 
 One binary, three roles (chosen by the config file):
@@ -41,8 +41,8 @@ chmod +x install.sh
 Дальше — поднять транспорт (это пока отдельные шаги):
 
 ```bash
-# Каскад RU→EU одной командой с RU-ноды (сам зайдёт на EU по SSH и поднимет WG):
-vlr cascade up                  # без флагов — интерактивно спросит IP/доступ/имя выхода
+# Каскад RU→EU одной командой с RU-ноды (сам зайдёт на EU по SSH и поднимет AWG):
+vlr cascade up                  # без флагов — интерактивно спросит IP/доступ/имя выхода/автозапуск
 #   или по флагам: vlr cascade up --eu-host 5.6.7.8 --eu-user root --eu-key ~/.ssh/id_ed25519
 
 # Поднять data-plane одной командой: поставить xray-core (если нет), выдать ему
@@ -68,10 +68,10 @@ vlr cascade check        # [OK]/[FAIL] по сайтам через каскад
 
 ## Why these choices
 
-- **Cascade = WireGuard, not SOCKS5/SSH.** The inner RU→EU hop carries *all*
-  client traffic incl. UDP and **HTTP/3 (QUIC)**. A TCP SOCKS5 proxy drops UDP
-  and breaks QUIC; SSH adds a second crypto layer over Reality. WireGuard is
-  kernel-space, UDP-native, lowest inter-DC overhead. DC↔DC needs no camouflage.
+- **Cascade = AmneziaWG.** The inner RU→EU hop supports UDP and **HTTP/3 (QUIC)**
+  with packet obfuscation. Existing WireGuard configs remain supported until
+  explicitly migrated with `vlr cascade up`. The wizard asks about boot startup;
+  automation can use `--autostart=true|false`. See [docs/CASCADE.md](docs/CASCADE.md).
 - **Fingerprint = `randomized`, never `chrome`.** In RU (mid-2026) `chrome` +
   Google SNI is reset on sight; JA4+ now matches static fingerprints. `vlr`
   defaults to a randomized ClientHello (no stable signature) and **refuses Google

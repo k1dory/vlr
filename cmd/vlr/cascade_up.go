@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +21,7 @@ import (
 // cmdCascadeUp provisions the EU exit from the RU node in one shot and brings the
 // tunnel up. This is the automated equivalent of Genomed-mtproto's `mtg kaskad`:
 // generate the RU key, SSH into EU (key or password), stand up a forward-only
-// WireGuard exit there, wire both sides, then healthcheck through the cascade.
+// AmneziaWG exit there, wire both sides, then healthcheck through the cascade.
 func cmdCascadeUp(args []string) error {
 	fs := newFlagSet("cascade up")
 	cfgPath := fs.String("config", "", "config path")
@@ -30,8 +33,9 @@ func cmdCascadeUp(args []string) error {
 	exitName := fs.String("exit-name", "", "label for the EU exit, e.g. eu-aeza-de")
 	exitCountry := fs.String("exit-country", "", "EU exit country, e.g. DE")
 	wan := fs.String("wan", "", "EU WAN interface for NAT (empty = auto-detect)")
-	wgPort := fs.Int("wg-port", 51820, "EU WireGuard listen port")
-	iface := fs.String("iface", "wg-cascade", "WireGuard interface name")
+	wgPort := fs.Int("wg-port", 51820, "EU AmneziaWG listen port")
+	autostart := fs.Bool("autostart", true, "start tunnel on both nodes after reboot")
+	iface := fs.String("iface", "wg-cascade", "AmneziaWG interface name")
 	ruIP := fs.String("ru-ip", "10.66.0.2", "RU tunnel IP")
 	euIP := fs.String("eu-ip", "10.66.0.1", "EU tunnel IP")
 	timeout := fs.Duration("timeout", 30*time.Second, "per-site healthcheck timeout")
@@ -49,6 +53,50 @@ func cmdCascadeUp(args []string) error {
 		return fmt.Errorf("provide --eu-key or --eu-pass for EU access")
 	}
 	c, err := loadCfg(*cfgPath)
+	if err != nil {
+		return err
+	}
+
+	if c.Role == config.RoleMain {
+		return fmt.Errorf("role=main does not run a cascade")
+	}
+	if err := cascade.ValidateExitParams(cascade.ExitProvisionParams{Iface: *iface, EUAddress: *euIP + "/24", WGPort: *wgPort, WAN: *wan, RUTunnelIP: *ruIP}); err != nil {
+		return err
+	}
+	explicitAutostart := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "autostart" {
+			explicitAutostart = true
+		}
+	})
+	if !explicitAutostart {
+		if c.Cascade.Autostart != nil {
+			*autostart = *c.Cascade.Autostart
+		}
+		if isInteractive() {
+			*autostart = askBool("Всегда поднимать туннель после перезагрузки на RU и EU?", *autostart)
+		}
+	}
+	oldCascade := c.Cascade
+	if oldCascade.Interface != "" && oldCascade.Interface != *iface {
+		return fmt.Errorf("changing the existing cascade interface is unsupported; reuse --iface %s", oldCascade.Interface)
+	}
+
+	c.Cascade.Transport = "awg"
+	c.Cascade.Autostart = autostart
+	if c.Cascade.AWG == nil {
+		c.Cascade.AWG, err = config.NewAWGConfig()
+		if err != nil {
+			return err
+		}
+	}
+	if err := c.Cascade.AWG.Validate(); err != nil {
+		return err
+	}
+	// Install locally before making any changes to the remote exit.
+	installCtx, installCancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer installCancel()
+	installedAWG, err := ensureAmneziaWG(installCtx)
 	if err != nil {
 		return err
 	}
@@ -86,12 +134,13 @@ func cmdCascadeUp(args []string) error {
 	if label != "" {
 		fmt.Printf("==> EU-выход «%s»\n", label)
 	}
-	fmt.Printf("==> провижу EU-выход %s (forward-only WireGuard)\n", *euHost)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	fmt.Printf("==> провижу EU-выход %s (forward-only AmneziaWG)\n", *euHost)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	euPub, err := cascade.ProvisionExit(ctx,
 		cascade.SSHOpts{Host: *euHost, Port: *euPort, User: *euUser, KeyPath: *euKey, Password: *euPass},
 		cascade.ExitProvisionParams{
+			AWG: c.Cascade.AWG, Autostart: *autostart,
 			Iface: *iface, EUAddress: *euIP + "/24", WGPort: *wgPort, WAN: *wan,
 			RUPublicKey: ruPub, RUTunnelIP: *ruIP,
 		})
@@ -113,8 +162,8 @@ func cmdCascadeUp(args []string) error {
 		c.Cascade.MTU = 1420
 	}
 	c.Cascade.ExitPublicKey = euPub
-	c.Cascade.ExitEndpoint = fmt.Sprintf("%s:%d", *euHost, *wgPort)
-	c.Cascade.ExitAllowedIP = "0.0.0.0/0, ::/0"
+	c.Cascade.ExitEndpoint = net.JoinHostPort(*euHost, strconv.Itoa(*wgPort))
+	c.Cascade.ExitAllowedIP = "0.0.0.0/0"
 	c.Cascade.ExitTunnelIP = *euIP
 	c.Cascade.ExitName = *exitName
 	c.Cascade.ExitCountry = *exitCountry
@@ -125,37 +174,44 @@ func cmdCascadeUp(args []string) error {
 	if savePath == "" {
 		savePath = config.DefaultPath()
 	}
-	if err := config.Save(savePath, c); err != nil {
-		return err
-	}
-
-	// 4. Write the RU wg-quick config and bring the interface up. Ensure the
-	// local WireGuard tools and /etc/wireguard exist first (the RU node may not
-	// have them — we only installed WireGuard on the EU box so far).
-	installedWG, werr := ensureWireguard(context.Background())
-	if werr != nil {
-		return werr
-	}
 	ruConf, err := wireguard.RenderEntry(c)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll("/etc/wireguard", 0o700); err != nil {
-		return fmt.Errorf("mkdir /etc/wireguard: %w", err)
+	if err := os.MkdirAll(c.Cascade.ConfigDir(), 0o700); err != nil {
+		return fmt.Errorf("mkdir AWG config dir: %w", err)
 	}
-	wgPath := "/etc/wireguard/" + *iface + ".conf"
+	wgPath := filepath.Join(c.Cascade.ConfigDir(), *iface+".conf")
+	if _, err := os.Stat(filepath.Join(oldCascade.ConfigDir(), *iface+".conf")); err == nil {
+		if out, err := exec.CommandContext(ctx, "systemctl", "disable", "--now", oldCascade.Tool()+"-quick@"+*iface).CombinedOutput(); err != nil {
+			return fmt.Errorf("stop previous tunnel: %w\n%s", err, out)
+		}
+		_ = exec.CommandContext(ctx, oldCascade.Tool()+"-quick", "down", *iface).Run()
+	}
 	if err := os.WriteFile(wgPath, []byte(ruConf), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", wgPath, err)
 	}
 	fmt.Printf("==> поднимаю туннель RU (%s)\n", *iface)
-	_ = exec.CommandContext(ctx, "wg-quick", "down", *iface).Run() // ignore if not up
+	_ = exec.CommandContext(ctx, "awg-quick", "down", *iface).Run() // ignore if not up
 	// Best-effort: drop a stale "not fwmark" policy rule left by older versions,
 	// so it can't keep capturing the node's own (SSH) traffic.
 	fwStr := fmt.Sprintf("%d", config.CascadeFwmark)
 	_ = exec.CommandContext(ctx, "ip", "rule", "del", "not", "fwmark", fwStr, "table", fwStr).Run()
-	if out, err := exec.CommandContext(ctx, "wg-quick", "up", *iface).CombinedOutput(); err != nil {
-		return fmt.Errorf("wg-quick up %s: %w\n%s", *iface, err, out)
+	unit := "awg-quick@" + *iface
+	action := "disable"
+	if *autostart {
+		action = "enable"
 	}
+	if out, err := exec.CommandContext(ctx, "systemctl", action, unit).CombinedOutput(); err != nil {
+		return fmt.Errorf("%s %s: %w\n%s", action, unit, err, out)
+	}
+	if out, err := exec.CommandContext(ctx, "systemctl", "restart", unit).CombinedOutput(); err != nil {
+		return fmt.Errorf("start %s: %w\n%s", unit, err, out)
+	}
+	if err := config.Save(savePath, c); err != nil {
+		return err
+	}
+	fmt.Printf("✓ автозапуск туннеля: %t (RU и EU)\n", *autostart)
 
 	// Record what we just created so `vlr uninstall` can reverse it. The EU exit
 	// stores host/user/port/key for remote teardown — never the password.
@@ -163,11 +219,11 @@ func cmdCascadeUp(args []string) error {
 	if installedSshpass {
 		_ = ledger.Record(lp, ledger.KindPackage, "sshpass", nil)
 	}
-	if installedWG {
-		_ = ledger.Record(lp, ledger.KindPackage, "wireguard", nil)
+	if installedAWG {
+		_ = ledger.Record(lp, ledger.KindPackage, "amneziawg", nil)
 	}
 	_ = ledger.Record(lp, ledger.KindFile, wgPath, nil)
-	_ = ledger.Record(lp, ledger.KindWGIface, *iface, nil)
+	_ = ledger.Record(lp, ledger.KindWGIface, *iface, map[string]string{"transport": "awg"})
 	_ = ledger.Record(lp, ledger.KindEUExit, *euHost, map[string]string{
 		"user": *euUser, "port": fmt.Sprintf("%d", *euPort),
 		"iface": *iface, "key_path": *euKey,
@@ -175,11 +231,11 @@ func cmdCascadeUp(args []string) error {
 
 	// 5. Confirm handshake, then healthcheck through the cascade.
 	time.Sleep(2 * time.Second)
-	up, _ := (cascade.WGMonitor{Interface: *iface}).Healthy(ctx)
+	up, _ := (cascade.WGMonitor{Interface: *iface, Tool: "awg"}).Healthy(ctx)
 	if !up {
-		fmt.Println("⚠ нет свежего WireGuard-handshake — проверь, что EU слушает порт и доступен")
+		fmt.Println("⚠ нет свежего AmneziaWG-handshake — проверь, что EU слушает порт и доступен")
 	} else {
-		fmt.Println("✓ WireGuard handshake есть")
+		fmt.Println("✓ AmneziaWG handshake есть")
 	}
 	if *skipCheck {
 		return nil
@@ -250,10 +306,15 @@ func ensureSshpass(ctx context.Context) (bool, error) {
 	return ensurePackage(ctx, "sshpass", nil, "sshpass")
 }
 
-// ensureWireguard installs wireguard-tools (wg, wg-quick) on the local RU node.
-func ensureWireguard(ctx context.Context) (bool, error) {
-	return ensurePackage(ctx, "wg-quick",
-		map[string]string{"apt-get": "wireguard"}, "wireguard-tools")
+// ensureAmneziaWG checks both the tools and an available implementation.
+func ensureAmneziaWG(ctx context.Context) (bool, error) {
+	_, missing := exec.LookPath("awg")
+	cmd := exec.CommandContext(ctx, "bash", "-ec", cascade.AWGInstallScript)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("install AmneziaWG: %w", err)
+	}
+	return missing != nil, nil
 }
 
 // cascadeUpWizard interactively fills the EU exit parameters.
@@ -262,7 +323,7 @@ func cascadeUpWizard(euHost, euUser *string, euPort *int, euKey, euPass, exitNam
 ========================================
    vlr — поднять каскад RU→EU
 ========================================
-EU-выход будет настроен автоматически по SSH (forward-only WireGuard).
+EU-выход будет настроен автоматически по SSH (forward-only AmneziaWG).
 
 `)
 	for *euHost == "" {
@@ -299,6 +360,9 @@ func cmdCascadeCheck(args []string) error {
 	c, err := loadCfg(*cfgPath)
 	if err != nil {
 		return err
+	}
+	if !c.Cascade.Enabled || c.Cascade.Interface == "" {
+		return fmt.Errorf("cascade is not configured")
 	}
 	var sites []string
 	if *sitesCSV != "" {

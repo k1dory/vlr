@@ -1,9 +1,12 @@
 package cascade
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/k1dory/vlr/internal/config"
 )
 
 func TestBuildExitScript(t *testing.T) {
@@ -12,7 +15,7 @@ func TestBuildExitScript(t *testing.T) {
 		WAN: "", RUPublicKey: "RUPUBKEYBASE64=", RUTunnelIP: "10.66.0.2",
 	})
 	musts := []string{
-		"wg genkey",                   // EU generates its own key
+		"awg genkey",                  // EU generates its own key
 		"ListenPort = 51820",          // port wired
 		"AllowedIPs = 10.66.0.2/32",   // forward-only: only the RU peer
 		"PublicKey = RUPUBKEYBASE64=", // RU pub injected
@@ -30,6 +33,51 @@ func TestBuildExitScript(t *testing.T) {
 	// The EU private key must never be templated in by us — it is made on the box.
 	if strings.Contains(s, "{{") {
 		t.Errorf("unreplaced placeholder remains:\n%s", s)
+	}
+}
+
+func TestExitAWGAutostart(t *testing.T) {
+	a, err := config.NewAWGConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{true, false} {
+		s := BuildExitScript(ExitProvisionParams{Iface: "wg-cascade", EUAddress: "10.66.0.1/24", WGPort: 51820, RUTunnelIP: "10.66.0.2", AWG: a, Autostart: enabled})
+		action := "disable"
+		if enabled {
+			action = "enable"
+		}
+		for _, want := range []string{a.Render(), "systemctl " + action + " awg-quick@wg-cascade", "systemctl start awg-quick@wg-cascade", "/etc/amnezia/amneziawg/wg-cascade.conf"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("missing %q", want)
+			}
+		}
+		if strings.Contains(s, "systemctl enable wg-quick@") {
+			t.Error("legacy WG must not auto-start")
+		}
+		stop := strings.Index(s, "systemctl stop awg-quick@")
+		write := strings.Index(s, "cat > /etc/amnezia/amneziawg/")
+		if stop < 0 || stop > write {
+			t.Error("must stop old interface before replacing PostDown hooks")
+		}
+		cmd := exec.Command("bash", "-n")
+		cmd.Stdin = strings.NewReader(s)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("invalid bootstrap shell: %v: %s", err, out)
+		}
+	}
+}
+
+func TestValidateExitParams(t *testing.T) {
+	p := ExitProvisionParams{Iface: "wg-cascade", EUAddress: "10.66.0.1/24", WGPort: 51820, RUTunnelIP: "10.66.0.2"}
+	if err := ValidateExitParams(p); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"../bad", "wg;id", "$(id)", "", "1234567890123456"} {
+		p.Iface = bad
+		if ValidateExitParams(p) == nil {
+			t.Errorf("accepted interface %q", bad)
+		}
 	}
 }
 

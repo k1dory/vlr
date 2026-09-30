@@ -159,12 +159,14 @@ type EntryConfig struct {
 
 // CascadeConfig describes the RU(entry) -> EU(exit) inner hop.
 //
-// Transport is WireGuard: kernel-space, UDP, carries HTTP/3 and all UDP traffic
-// (which SOCKS5-over-SSH cannot), with the lowest inter-DC overhead. The entry
-// node routes client egress into the WG tunnel; the EU peer performs the actual
-// internet egress. No Reality is needed on this hop — it is datacenter-to-
-// datacenter, where camouflage buys nothing and pure speed wins.
+// New cascades use AmneziaWG; an empty transport preserves legacy WireGuard.
+// The entry routes client egress into the tunnel; the EU peer provides NAT.
 type CascadeConfig struct {
+	// Empty transport means legacy WireGuard; cascade up explicitly selects awg.
+	Transport string     `json:"transport,omitempty"`
+	Autostart *bool      `json:"autostart,omitempty"`
+	AWG       *AWGConfig `json:"awg,omitempty"`
+
 	Enabled bool `json:"enabled"`
 
 	// Human labels for the EU exit (asked interactively by `vlr cascade up`).
@@ -257,6 +259,14 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("main.api_listen is required for role=main")
 		}
 		return nil
+	}
+	if c.Cascade.Transport != "" && c.Cascade.Transport != "wg" && c.Cascade.Transport != "awg" {
+		return fmt.Errorf("unknown cascade transport %q", c.Cascade.Transport)
+	}
+	if c.Cascade.Enabled && c.Cascade.Transport == "awg" {
+		if err := c.Cascade.AWG.Validate(); err != nil {
+			return err
+		}
 	}
 	// data-plane roles (standalone, child)
 	if c.Entry.Host == "" {
