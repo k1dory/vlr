@@ -64,6 +64,8 @@ func main() {
 		err = cmdNode(args)
 	case "split":
 		err = cmdSplit(args)
+	case "limit":
+		err = cmdLimit(args)
 	case "up":
 		err = cmdUp(args)
 	case "render":
@@ -103,6 +105,7 @@ COMMANDS
   cascade     gen|exit|test the RU->EU WireGuard hop
   user        add|rm|list|link  (all fields optional; auto-applies Xray)
   split       add|rm|list  RU-direct domains (split-tunnel: egress from RU, not EU)
+  limit       set --max-devices N | off | show  (devices = source IPs per subscription)
   node        connect (attach this node to a main agent) | register|list (main role)
   up          install/refresh Xray + apply config (one-shot data-plane bring-up)
   render      print the Xray config

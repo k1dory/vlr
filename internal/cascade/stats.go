@@ -26,8 +26,10 @@ type XrayStats struct {
 
 type statsQuery struct {
 	Stat []struct {
-		Name  string `json:"name"`
-		Value string `json:"value"`
+		Name string `json:"name"`
+		// Value is a JSON string in older Xray ("123") and a number in Xray 26+
+		// (123); RawMessage + trimming quotes accepts both.
+		Value json.RawMessage `json:"value"`
 	} `json:"stat"`
 }
 
@@ -48,41 +50,51 @@ func (x XrayStats) Poll(ctx context.Context, s *store.Store) error {
 	if err != nil {
 		return fmt.Errorf("xray statsquery: %w", err)
 	}
-	var q statsQuery
-	if err := json.Unmarshal(out, &q); err != nil {
-		return fmt.Errorf("parse stats: %w", err)
+	agg, err := parseStats(out)
+	if err != nil {
+		return err
 	}
 
-	type counter struct{ rx, tx int64 }
-	agg := map[string]*counter{}
+	var firstErr error
+	for id, c := range agg {
+		if err := s.UpdateTraffic(id, c.Rx, c.Tx); err != nil && firstErr == nil {
+			firstErr = err // user may have just been removed; keep going
+		}
+	}
+	return firstErr
+}
+
+// userTraffic is one user's cumulative counters (Rx = downlink, Tx = uplink).
+type userTraffic struct{ Rx, Tx int64 }
+
+// parseStats turns `xray api statsquery` output into per-statID counters. Stat
+// names have the form "user>>>{statID}>>>traffic>>>{uplink|downlink}".
+func parseStats(out []byte) (map[string]*userTraffic, error) {
+	var q statsQuery
+	if err := json.Unmarshal(out, &q); err != nil {
+		return nil, fmt.Errorf("parse stats: %w", err)
+	}
+	agg := map[string]*userTraffic{}
 	for _, st := range q.Stat {
 		parts := strings.Split(st.Name, ">>>")
 		if len(parts) != 4 || parts[0] != "user" || parts[2] != "traffic" {
 			continue
 		}
-		id := parts[1]
-		v, perr := strconv.ParseInt(st.Value, 10, 64)
+		v, perr := strconv.ParseInt(strings.Trim(string(st.Value), `"`), 10, 64)
 		if perr != nil {
 			continue
 		}
-		c := agg[id]
+		c := agg[parts[1]]
 		if c == nil {
-			c = &counter{}
-			agg[id] = c
+			c = &userTraffic{}
+			agg[parts[1]] = c
 		}
 		switch parts[3] {
 		case "downlink": // server -> client = received by the user
-			c.rx = v
+			c.Rx = v
 		case "uplink": // client -> server = sent by the user
-			c.tx = v
+			c.Tx = v
 		}
 	}
-
-	var firstErr error
-	for id, c := range agg {
-		if err := s.UpdateTraffic(id, c.rx, c.tx); err != nil && firstErr == nil {
-			firstErr = err // user may have just been removed; keep going
-		}
-	}
-	return firstErr
+	return agg, nil
 }

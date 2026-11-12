@@ -160,6 +160,7 @@ vlr keys        generate Reality / WireGuard keys (--type reality|wireguard)
 vlr cascade     up | check | gen | exit | test   (RU->EU WireGuard hop)
 vlr user        add | rm | list | link           (all fields optional; auto-applies Xray)
 vlr split       add | rm | list                  (RU-direct domains, split-tunnel)
+vlr limit       set --max-devices N | off | show   (devices per subscription, docs/LIMITS.md)
 vlr node        connect (attach to a main agent) | register | list (main role)
 vlr up          install/refresh Xray + apply config (one-shot data-plane bring-up)
 vlr render      print the Xray config for this node

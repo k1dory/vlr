@@ -85,6 +85,7 @@ func (s *Standalone) Run(ctx context.Context) error {
 
 	srv := &http.Server{Addr: subListen(s.cfg), Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go s.monitorLoop(ctx)
+	startDeviceLimit(ctx, s.cfg, s.log)
 	// Optional reconcile backstop (off unless a poll interval + API creds are set).
 	// The webhook is the real-time path; this only catches missed events.
 	if s.cfg.Authentik.Enabled && s.cfg.Authentik.ReconcileSeconds > 0 &&
