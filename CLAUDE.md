@@ -47,7 +47,7 @@ FlyTelega (Aeza + Yandex Cloud API docs).
 
 ```
 make build | test | vet | build-linux
-./install.sh           # global `vlr` + systemd unit (like mtg's install.sh)
+./install.sh           # release binary + systemd unit; --from-source builds the clone
 vlr init|keys|cascade|user|split|node|up|render|serve|status|uninstall|ledger|version
 ```
 

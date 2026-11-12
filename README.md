@@ -13,30 +13,45 @@ One binary, three roles (chosen by the config file):
 | **child** | Same data plane, but reports to a main server: **pushes** cheap heartbeats and **exposes** a pull API the main calls on demand. |
 | **main** | No data plane. Ingests heartbeats, runs **delta-triggered pulls**, aggregates every child, issues subscriptions centrally. |
 
-## Установка (после `git clone`)
+## Установка
 
-На свежем сервере (Ubuntu/Debian, root):
+На свежем сервере (Ubuntu/Debian, root) — готовый статический бинарь из
+[GitHub Releases](https://github.com/k1dory/vlr/releases), без Go и сборки:
 
 ```bash
-git clone git@github.com:k1dory/vlr.git /opt/vlr
-cd /opt/vlr
+curl -fsSL https://github.com/k1dory/vlr/releases/latest/download/install.sh | sudo bash
 
-# Опционально: настроить домены-приманки и split-tunnel ДО установки
-cp env.example .env && nano .env        # DOMAIN_FOR_TLS / OWN_DOMAIN / SPLIT_RU_DOMAINS
-
-# Одна кнопка: ставит Go (если нет), собирает бинарь, кладёт глобальную команду
-# vlr в /usr/local/bin, ставит systemd-юнит, запускает интерактивный мастер
-# (меню режимов 1/2/3) и поднимает сервис.
-chmod +x install.sh
-./install.sh
+# конкретная версия:
+curl -fsSL https://github.com/k1dory/vlr/releases/latest/download/install.sh | sudo VLR_VERSION=v0.2.0 bash
 ```
 
+Домены-приманки и split-tunnel (`DOMAIN_FOR_TLS` / `OWN_DOMAIN` /
+`SPLIT_RU_DOMAINS`) правятся в `/etc/vlr/.env` — установщик создаёт его из
+`env.example`; поправь до `vlr init`.
+
 Что делает `install.sh` по шагам:
-1. **Ставит Go 1.25**, если его нет (официальный бинарь; `VLR_AUTO_GO=0` — только показать команды).
-2. **Собирает** статический `vlr` (`CGO_ENABLED=0`, без внешних зависимостей).
-3. **Устанавливает** команду в `/usr/local/bin/vlr` и копирует `systemd`-юнит.
-4. **Запускает мастер** `vlr init` — спросит режим (1 самостоятельный / 2 дочерний / 3 main), ID узла, регион; публичный IP определит сам.
-5. **Включает сервис**: `systemctl enable --now vlr` (мониторинг + отдача подписки).
+1. **Скачивает** `vlr_<tag>_linux_<amd64|arm64>.tar.gz` из релиза и **сверяет SHA256** по `SHA256SUMS`.
+2. **Устанавливает** команду в `/usr/local/bin/vlr`, `systemd`-юнит и `/etc/vlr/.env` (если его нет).
+3. **Запускает мастер** `vlr init` (если есть терминал, в т.ч. под `curl | bash`) — спросит режим (1 самостоятельный / 2 дочерний / 3 main), ID узла, регион; публичный IP определит сам.
+4. **Включает сервис**: `systemctl enable --now vlr` (мониторинг + отдача подписки).
+
+> **Обновление:** та же команда — поставит последний релиз и перезапустит работающий `vlr`.
+>
+> **Из исходников** (ставит Go при необходимости и собирает клон):
+> `git clone https://github.com/k1dory/vlr /opt/vlr && cd /opt/vlr && ./install.sh --from-source`
+>
+> **Зеркало** (если GitHub недоступен с узла): выложи ассеты релиза на свой
+> хост и запусти `VLR_DOWNLOAD_BASE=https://mirror/vlr/v0.2.0 VLR_VERSION=v0.2.0 ./install.sh`.
+
+### Выпуск релиза
+
+Тег `vX.Y.Z` → GitHub Actions (`.github/workflows/release.yml`) гоняет
+`vet`/`test`, собирает `make dist` (linux amd64+arm64, версия вшивается в
+бинарь) и публикует релиз с тарболами, `install.sh` и `SHA256SUMS`:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
 
 Дальше — поднять транспорт (это пока отдельные шаги):
 
@@ -61,8 +76,6 @@ vlr status               # узел, режим, каскад, число юзе
 vlr cascade check        # [OK]/[FAIL] по сайтам через каскад
 ```
 
-> Обновление на сервере: `cd /opt/vlr && git pull && ./install.sh`.
->
 > Полное удаление (декларативный откат всего, что ставилось — бинарь, юнит,
 > туннель, EU-выход, опц. Go): `vlr uninstall` (см. [docs/UNINSTALL.md](docs/UNINSTALL.md)).
 
@@ -92,7 +105,7 @@ Same as above but with explicit flags instead of the wizard — useful for Ansib
 or many nodes:
 
 ```bash
-./install.sh                  # build + install global `vlr` + systemd unit
+curl -fsSL https://github.com/k1dory/vlr/releases/latest/download/install.sh | sudo bash   # global `vlr` + systemd unit
 
 vlr init --role standalone --node-id ru-yc-msk-01   # public IP auto-detected
 
