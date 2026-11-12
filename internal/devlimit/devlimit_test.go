@@ -134,3 +134,14 @@ func TestBuildRulesPutsBansFirst(t *testing.T) {
 		t.Fatalf("ruleTag %v", r[0]["ruleTag"])
 	}
 }
+
+func TestParseOldXrayPerUserFormat(t *testing.T) {
+	emails, err := parseOnlineUsers([]byte(`{"users":["user>>>a@x>>>online","user>>>b@x>>>online","junk"]}`))
+	if err != nil || !reflect.DeepEqual(emails, []string{"a@x", "b@x"}) {
+		t.Fatalf("emails=%v err=%v", emails, err)
+	}
+	ips, err := parseUserIPs([]byte(`{"ips":{"10.0.0.2":2,"10.0.0.1":1},"name":"user>>>a@x>>>online"}`))
+	if err != nil || !reflect.DeepEqual(ips, []string{"10.0.0.1", "10.0.0.2"}) {
+		t.Fatalf("ips=%v err=%v", ips, err)
+	}
+}
