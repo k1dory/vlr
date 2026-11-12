@@ -39,6 +39,7 @@ func NewChild(cfg *config.Config, st *store.Store, log *slog.Logger, stats Stats
 // cancelled.
 func (c *Child) Run(ctx context.Context) error {
 	go c.heartbeatLoop(ctx)
+	startDeviceLimit(ctx, c.cfg, c.log)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/pull", c.authPull(c.handlePull))

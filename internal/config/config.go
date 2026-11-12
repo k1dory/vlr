@@ -87,6 +87,19 @@ type Config struct {
 	Child     ChildConfig     `json:"child"`     // set when Role==child
 	Main      MainConfig      `json:"main"`      // set when Role==main
 	Authentik AuthentikConfig `json:"authentik"` // optional SSO reconcile (auto-revoke)
+	Limits    LimitsConfig    `json:"limits"`    // per-subscription device limit
+}
+
+// LimitsConfig caps concurrent devices (distinct source IPs) per user on this
+// node. Enforced by the daemon via the Xray API (internal/devlimit).
+type LimitsConfig struct {
+	// MaxDevices is the allowed number of simultaneous IPs per user; 0 = off.
+	MaxDevices int `json:"max_devices,omitempty"`
+	// BanSeconds is how long an over-limit IP is blocked for that user
+	// (default 60). Short on purpose: a phone switching Wi-Fi->LTE recovers fast.
+	BanSeconds int `json:"ban_seconds,omitempty"`
+	// CheckSeconds is the enforcement tick (default 15).
+	CheckSeconds int `json:"check_seconds,omitempty"`
 }
 
 // AuthentikConfig drives auto-revoke. The primary mechanism is EVENT-DRIVEN: a
@@ -291,6 +304,9 @@ func (c *Config) Validate() error {
 	}
 	if c.PortalHeader == "" {
 		c.PortalHeader = "X-Authentik-Email"
+	}
+	if c.Limits.MaxDevices < 0 || c.Limits.BanSeconds < 0 || c.Limits.CheckSeconds < 0 {
+		return fmt.Errorf("limits must not be negative")
 	}
 	if c.Role == RoleChild {
 		if c.Child.MainURL == "" {

@@ -118,7 +118,8 @@ func Render(c *config.Config, users []store.User) ([]byte, error) {
 		"stats": map[string]any{},
 		"policy": map[string]any{
 			"levels": map[string]any{
-				"0": map[string]any{"statsUserUplink": true, "statsUserDownlink": true},
+				// statsUserOnline: per-user online IPs, read by the device limiter.
+				"0": map[string]any{"statsUserUplink": true, "statsUserDownlink": true, "statsUserOnline": true},
 			},
 			"system": map[string]any{
 				"statsInboundUplink":   true,
@@ -126,8 +127,10 @@ func Render(c *config.Config, users []store.User) ([]byte, error) {
 			},
 		},
 		"api": map[string]any{
-			"tag":      "api",
-			"services": []string{"StatsService"},
+			"tag": "api",
+			// RoutingService lets the device limiter add per-(user,ip) block
+			// rules at runtime without restarting Xray. Loopback-only (api-in).
+			"services": []string{"StatsService", "RoutingService"},
 		},
 		"inbounds": []any{
 			map[string]any{
