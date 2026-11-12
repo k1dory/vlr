@@ -100,6 +100,9 @@ type LimitsConfig struct {
 	BanSeconds int `json:"ban_seconds,omitempty"`
 	// CheckSeconds is the enforcement tick (default 15).
 	CheckSeconds int `json:"check_seconds,omitempty"`
+	// Exempt lists user emails (Xray stat ids) the limit never applies to,
+	// e.g. the admin account whose own machines all ride this node.
+	Exempt []string `json:"exempt,omitempty"`
 }
 
 // AuthentikConfig drives auto-revoke. The primary mechanism is EVENT-DRIVEN: a
