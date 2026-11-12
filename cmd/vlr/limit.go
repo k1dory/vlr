@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/k1dory/vlr/internal/config"
@@ -14,7 +16,7 @@ import (
 
 // cmdLimit manages the per-subscription device limit (limits.max_devices).
 //
-//	vlr limit set --max-devices 3 [--ban-seconds 60]
+//	vlr limit set --max-devices 3 [--ban-seconds 60] [--exempt a@x,b@y]
 //	vlr limit off
 //	vlr limit show            # policy + online IPs per user right now
 func cmdLimit(args []string) error {
@@ -27,6 +29,7 @@ func cmdLimit(args []string) error {
 	maxDev := fs.Int("max-devices", 0, "simultaneous devices (source IPs) per user; 0 = off")
 	banSec := fs.Int("ban-seconds", 0, "how long an over-limit IP stays blocked (default 60)")
 	checkSec := fs.Int("check-seconds", 0, "enforcement interval (default 15)")
+	exempt := fs.String("exempt", "", "comma-separated user emails the limit never applies to (replaces the list; \"-\" clears)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -55,6 +58,13 @@ func cmdLimit(args []string) error {
 			}
 			if *checkSec > 0 {
 				c.Limits.CheckSeconds = *checkSec
+			}
+			switch *exempt {
+			case "":
+			case "-":
+				c.Limits.Exempt = nil
+			default:
+				c.Limits.Exempt = dedupNonEmpty(strings.Split(*exempt, ","))
 			}
 		}
 		if err := c.Validate(); err != nil {
@@ -92,6 +102,9 @@ func showLimit(c *config.Config) error {
 	} else {
 		fmt.Println("лимит: выключен")
 	}
+	if len(c.Limits.Exempt) > 0 {
+		fmt.Printf("без лимита: %s\n", strings.Join(c.Limits.Exempt, ", "))
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	online, err := devlimit.Xray{ConfigPath: c.Xray.ConfigPath}.Online(ctx)
@@ -106,7 +119,9 @@ func showLimit(c *config.Config) error {
 	fmt.Printf("онлайн: %d пользователей\n", len(users))
 	for _, u := range users {
 		mark := ""
-		if c.Limits.MaxDevices > 0 && len(online[u]) > c.Limits.MaxDevices {
+		if slices.Contains(c.Limits.Exempt, u) {
+			mark = "  (без лимита)"
+		} else if c.Limits.MaxDevices > 0 && len(online[u]) > c.Limits.MaxDevices {
 			mark = "  ← сверх лимита"
 		}
 		fmt.Printf("  %-40s %d IP %v%s\n", u, len(online[u]), online[u], mark)

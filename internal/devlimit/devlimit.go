@@ -27,6 +27,8 @@ import (
 type Policy struct {
 	Max int           // allowed concurrent IPs per user; <=0 disables the limiter
 	Ban time.Duration // how long an over-limit IP stays blocked
+	// Exempt users are never banned, whatever their IP count.
+	Exempt []string
 }
 
 // Ban is one blocked (user, ip) pair.
@@ -42,6 +44,7 @@ type Limiter struct {
 	policy    Policy
 	firstSeen map[string]map[string]time.Time // user -> ip -> first seen
 	bans      map[string]map[string]time.Time // user -> ip -> banned until
+	exempt    map[string]bool
 }
 
 // New returns a limiter for the given policy.
@@ -49,7 +52,12 @@ func New(p Policy) *Limiter {
 	if p.Ban <= 0 {
 		p.Ban = 60 * time.Second
 	}
+	exempt := map[string]bool{}
+	for _, e := range p.Exempt {
+		exempt[e] = true
+	}
 	return &Limiter{
+		exempt:    exempt,
 		policy:    p,
 		firstSeen: map[string]map[string]time.Time{},
 		bans:      map[string]map[string]time.Time{},
@@ -104,6 +112,9 @@ func (l *Limiter) Step(now time.Time, online map[string][]string) (bans []Ban, c
 	//    allowed, the remainder get banned.
 	if l.policy.Max > 0 {
 		for u, seen := range l.firstSeen {
+			if l.exempt[u] {
+				continue
+			}
 			cand := make([]string, 0, len(seen))
 			for ip := range seen {
 				if _, banned := l.bans[u][ip]; !banned {

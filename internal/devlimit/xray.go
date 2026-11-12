@@ -210,7 +210,7 @@ func Run(ctx context.Context, log *slog.Logger, p Policy, x Xray, every time.Dur
 	l := New(p)
 	t := time.NewTicker(every)
 	defer t.Stop()
-	log.Info("device limit enabled", "max_devices", p.Max, "ban", l.policy.Ban.String(), "every", every.String())
+	log.Info("device limit enabled", "exempt", len(p.Exempt), "max_devices", p.Max, "ban", l.policy.Ban.String(), "every", every.String())
 	pushed := 0
 	for {
 		select {

@@ -82,6 +82,17 @@ func TestStillOverLimitAfterExpiryIsRebanned(t *testing.T) {
 	}
 }
 
+func TestExemptUserNeverBanned(t *testing.T) {
+	l := New(Policy{Max: 1, Ban: time.Minute, Exempt: []string{"admin@x"}})
+	bans, _ := l.Step(t0, map[string][]string{
+		"admin@x": {"1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4"},
+		"u@x":     {"5.5.5.5", "6.6.6.6"},
+	})
+	if !reflect.DeepEqual(ips(bans), map[string][]string{"u@x": {"6.6.6.6"}}) {
+		t.Fatalf("want only u@x banned, got %v", bans)
+	}
+}
+
 func TestDisabledPolicyNeverBans(t *testing.T) {
 	l := New(Policy{Max: 0})
 	bans, _ := l.Step(t0, map[string][]string{"a": {"1.1.1.1", "2.2.2.2", "3.3.3.3"}})

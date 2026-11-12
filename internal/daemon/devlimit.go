@@ -21,7 +21,7 @@ func startDeviceLimit(ctx context.Context, cfg *config.Config, log *slog.Logger)
 		log.Warn("device limit configured but xray not found; not enforcing", "max_devices", l.MaxDevices)
 		return
 	}
-	p := devlimit.Policy{Max: l.MaxDevices, Ban: time.Duration(l.BanSeconds) * time.Second}
+	p := devlimit.Policy{Max: l.MaxDevices, Ban: time.Duration(l.BanSeconds) * time.Second, Exempt: l.Exempt}
 	x := devlimit.Xray{ConfigPath: cfg.Xray.ConfigPath}
 	go devlimit.Run(ctx, log, p, x, time.Duration(l.CheckSeconds)*time.Second)
 }

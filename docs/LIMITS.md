@@ -6,6 +6,8 @@ A device = a distinct client source IP that Xray currently sees for that user.
 ```bash
 vlr limit set --max-devices 3            # 3 devices per subscription (ban 60s, check 15s)
 vlr limit set --max-devices 2 --ban-seconds 120
+vlr limit set --max-devices 2 --exempt admin@genomed-security.ru   # never limit these
+vlr limit set --max-devices 2 --exempt -                            # clear exemptions
 vlr limit show                           # policy + online IPs per user right now
 vlr limit off
 ```
