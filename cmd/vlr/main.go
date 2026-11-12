@@ -40,7 +40,8 @@ import (
 	"github.com/k1dory/vlr/internal/xray"
 )
 
-var version = "0.1.0"
+// version is stamped at build time: -ldflags "-X main.version=<tag>" (Makefile, release CI).
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
