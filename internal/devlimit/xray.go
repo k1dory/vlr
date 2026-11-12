@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -36,14 +38,78 @@ func (x Xray) bin() string {
 	return "xray"
 }
 
-// Online returns user email -> online source IPs.
+// Online returns user email -> online source IPs. It uses the one-shot
+// `statsonlineiplist -all` (Xray 26.4+) and falls back to listing online users
+// and querying each one (older Xray, which lacks -all).
 func (x Xray) Online(ctx context.Context) (map[string][]string, error) {
 	out, err := exec.CommandContext(ctx, x.bin(), "api", "statsonlineiplist",
 		"--server="+x.addr(), "-all").Output()
-	if err != nil {
-		return nil, fmt.Errorf("xray statsonlineiplist: %w", err)
+	if err == nil {
+		return parseOnline(out)
 	}
-	return parseOnline(out)
+	return x.onlinePerUser(ctx)
+}
+
+func (x Xray) onlinePerUser(ctx context.Context) (map[string][]string, error) {
+	out, err := exec.CommandContext(ctx, x.bin(), "api", "statsgetallonlineusers",
+		"--server="+x.addr()).Output()
+	if err != nil {
+		return nil, fmt.Errorf("xray statsgetallonlineusers: %w", err)
+	}
+	emails, err := parseOnlineUsers(out)
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string][]string, len(emails))
+	for _, e := range emails {
+		out, err := exec.CommandContext(ctx, x.bin(), "api", "statsonlineiplist",
+			"--server="+x.addr(), "-email", e).Output()
+		if err != nil {
+			continue // user went offline between the two calls
+		}
+		ips, err := parseUserIPs(out)
+		if err != nil {
+			return nil, err
+		}
+		if len(ips) > 0 {
+			m[e] = ips
+		}
+	}
+	return m, nil
+}
+
+// parseOnlineUsers: {"users":["user>>>EMAIL>>>online", ...]} -> emails.
+func parseOnlineUsers(b []byte) ([]string, error) {
+	var resp struct {
+		Users []string `json:"users"`
+	}
+	if err := json.Unmarshal(b, &resp); err != nil {
+		return nil, fmt.Errorf("parse online users: %w", err)
+	}
+	out := make([]string, 0, len(resp.Users))
+	for _, u := range resp.Users {
+		e := strings.TrimSuffix(strings.TrimPrefix(u, "user>>>"), ">>>online")
+		if e != "" && e != u {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// parseUserIPs: {"ips":{"1.2.3.4":<unix>}, "name":...} -> sorted IPs.
+func parseUserIPs(b []byte) ([]string, error) {
+	var resp struct {
+		IPs map[string]int64 `json:"ips"`
+	}
+	if err := json.Unmarshal(b, &resp); err != nil {
+		return nil, fmt.Errorf("parse user ips: %w", err)
+	}
+	out := make([]string, 0, len(resp.IPs))
+	for ip := range resp.IPs {
+		out = append(out, ip)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func parseOnline(b []byte) (map[string][]string, error) {
@@ -144,7 +210,7 @@ func Run(ctx context.Context, log *slog.Logger, p Policy, x Xray, every time.Dur
 	l := New(p)
 	t := time.NewTicker(every)
 	defer t.Stop()
-	log.Info("device limit enabled", "max_devices", p.Max, "ban", p.Ban.String())
+	log.Info("device limit enabled", "max_devices", p.Max, "ban", l.policy.Ban.String(), "every", every.String())
 	pushed := 0
 	for {
 		select {
