@@ -224,15 +224,22 @@ func TestApplyAddsUserLiveWithoutRestart(t *testing.T) {
 	}
 }
 
-func TestApplyRemovesUserLive(t *testing.T) {
+// Review pass 3, finding 1: API removal does not end established sessions, so
+// a removal (revocation) must restart Xray.
+func TestApplyRemovalRestarts(t *testing.T) {
 	c, marker := testCfg(t)
 	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a", "b")), 0o644)
 	f := newFake(t, "a", "b")
 	if err := Apply(c, users("a")); err != nil {
 		t.Fatal(err)
 	}
-	if reloaded(marker) || !reflect.DeepEqual(f.emails(), []string{"a"}) {
-		t.Fatalf("restart=%v live=%v", reloaded(marker), f.emails())
+	if !reloaded(marker) {
+		t.Fatal("revocation must restart Xray")
+	}
+	for _, call := range f.calls {
+		if call == "rmu" || call == "adu" {
+			t.Fatalf("removal must not be patched live: calls=%v", f.calls)
+		}
 	}
 }
 
@@ -248,17 +255,17 @@ func TestApplyNoopTouchesNothing(t *testing.T) {
 	}
 }
 
-// Review finding 1: rmu reports per-user failure but exits 0.
-func TestApplySilentRPCFailureFallsBackToRestart(t *testing.T) {
+func TestApplyChangedCredentialRestarts(t *testing.T) {
 	c, marker := testCfg(t)
-	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a", "b")), 0o644)
-	f := newFake(t, "a", "b")
-	f.silentRmu = true
-	if err := Apply(c, users("a")); err != nil {
+	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
+	newFake(t, "a")
+	u := users("a")
+	u[0].Profile = "vision"
+	if err := Apply(c, u); err != nil {
 		t.Fatal(err)
 	}
 	if !reloaded(marker) {
-		t.Fatal("revoked user still live and no restart")
+		t.Fatal("changed credential (flow) must restart")
 	}
 }
 
@@ -276,16 +283,17 @@ func TestApplyAduFailureFallsBackToRestart(t *testing.T) {
 }
 
 // Review finding 2a: file already says {a} but Xray still runs {a,b} (an earlier
-// write failed after a live add). The next Apply must remove b.
+// write failed after a live add). The next Apply must not trust the file: b is
+// still live, so it restarts to drop it.
 func TestApplyComparesAgainstLiveNotFile(t *testing.T) {
 	c, marker := testCfg(t)
 	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
-	f := newFake(t, "a", "b")
+	newFake(t, "a", "b")
 	if err := Apply(c, users("a")); err != nil {
 		t.Fatal(err)
 	}
-	if reloaded(marker) || !reflect.DeepEqual(f.emails(), []string{"a"}) {
-		t.Fatalf("stale live user kept: live=%v", f.emails())
+	if !reloaded(marker) {
+		t.Fatal("user live but not desired must be dropped (restart)")
 	}
 }
 
@@ -376,9 +384,7 @@ func TestApplyReadsUsersUnderLock(t *testing.T) {
 	if !s.locked {
 		t.Fatal("users were read without holding the apply lock")
 	}
-	if !reflect.DeepEqual(f.emails(), []string{"a"}) {
-		t.Fatalf("live=%v", f.emails())
-	}
+	_ = f
 }
 
 // Re-review finding 1: an unreadable store must abort before touching Xray.
@@ -402,19 +408,19 @@ func TestApplyAbortsWhenUsersUnreadable(t *testing.T) {
 	}
 }
 
-func TestApplyRmuOkSilentAduFailureRestarts(t *testing.T) {
+func TestApplySilentAduFailureRestarts(t *testing.T) {
 	c, marker := testCfg(t)
-	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a", "b")), 0o644)
-	f := newFake(t, "a", "b")
+	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
+	f := newFake(t, "a")
 	f.silentAdu = true
 	if err := Apply(c, users("a", "c")); err != nil {
 		t.Fatal(err)
 	}
 	if !reloaded(marker) {
-		t.Fatal("partial live apply (rmu ok, adu silent no-op) must restart")
+		t.Fatal("silent adu failure must restart")
 	}
 	got, _ := os.ReadFile(c.Xray.ConfigPath)
-	if !strings.Contains(string(got), `"id-c"`) || strings.Contains(string(got), `"id-b"`) {
+	if !strings.Contains(string(got), `"id-c"`) {
 		t.Fatal("restart path must write the desired config")
 	}
 }

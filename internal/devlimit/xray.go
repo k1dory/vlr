@@ -234,7 +234,8 @@ func Run(ctx context.Context, log *slog.Logger, p Policy, x Applier, every time.
 	}
 	t := time.NewTicker(every)
 	defer t.Stop()
-	needPush := true // live rules unknown until the first successful push
+	needPush := true  // live rules unknown until the first successful push
+	var desired []Ban // last computed ban set; retried as-is if observation fails
 	for first := true; ; first = false {
 		if !first {
 			select {
@@ -243,7 +244,7 @@ func Run(ctx context.Context, log *slog.Logger, p Policy, x Applier, every time.
 			case <-t.C:
 			}
 		}
-		var bans []Ban
+		bans := desired // a failed observation must not turn into "no bans"
 		changed := false
 		if p.Max > 0 {
 			online, err := x.Online(ctx)
@@ -254,6 +255,7 @@ func Run(ctx context.Context, log *slog.Logger, p Policy, x Applier, every time.
 				}
 			} else {
 				bans, changed = l.Step(time.Now(), online)
+				desired = bans
 			}
 			if changed {
 				log.Info("device limit: bans changed", "active", len(bans))

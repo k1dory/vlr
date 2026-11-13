@@ -153,3 +153,34 @@ func TestUpdateTrafficBatchWritesOnlyOnChange(t *testing.T) {
 		t.Fatal("unchanged counters rewrote the state file")
 	}
 }
+
+// Review pass 3, finding 3: a state file that disappears after the store was
+// populated must not read as "no users" (Apply would remove everyone).
+func TestSnapshotFailsWhenStateFileVanishes(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s.AddUser(User{UUID: "u1", Email: "a@x"})
+	if err := os.Rename(filepath.Join(dir, "state.json"), filepath.Join(dir, "moved.json")); err != nil {
+		t.Fatal(err)
+	}
+	if u, err := s.Snapshot(); err == nil {
+		t.Fatalf("want error, got %d users", len(u))
+	}
+	if err := s.AddUser(User{UUID: "u2", Email: "b@x"}); err == nil {
+		t.Fatal("mutation on a vanished state file must fail, not start from empty")
+	}
+}
+
+func TestOpenCreatesEmptyStateFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, err := s.Snapshot(); err != nil || len(u) != 0 {
+		t.Fatalf("fresh store snapshot: %v %v", u, err)
+	}
+}

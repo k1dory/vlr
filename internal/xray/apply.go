@@ -43,9 +43,11 @@ func LockConfig(configPath string) (func(), error) {
 //   - the non-client part of the rendered config equals the file, and the
 //     running Xray's users (read back over its API) equal the rendered ones →
 //     at most the file is rewritten; nothing touches Xray;
-//   - only users differ → they are removed/added on the live Xray (HandlerService
-//     rmu/adu), the live user list is read back and must equal the rendered one,
-//     then the file is written. No restart, nobody's connection drops;
+//   - only NEW users → they are added on the live Xray (HandlerService adu), the
+//     live user list is read back and must equal the rendered one, then the file
+//     is written. No restart, nobody's connection drops;
+//   - a user removed or changed → restart: an API removal does not end that
+//     user's established sessions, so revocation must restart;
 //   - anything else — other config changed, no file, Xray down, API error, or
 //     the read-back does not match — write the file and restart Xray.
 //
@@ -113,6 +115,12 @@ func tryLive(path string, b []byte) (done bool, err error) {
 		return false, nil // Xray down or API off
 	}
 	p := Diff(live, desired)
+	if len(p.Remove) > 0 {
+		// Removing a user over the API does not end their established sessions
+		// (a VLESS Mux connection keeps opening streams). Revocation and
+		// credential changes therefore always go through a restart.
+		return false, nil
+	}
 	if !p.Empty() {
 		if err := applyLive(p); err != nil {
 			return false, nil
@@ -289,16 +297,10 @@ func parseLiveUsers(out []byte) (map[string]Client, error) {
 	return m, nil
 }
 
-// applyLive removes, then adds users on the running Xray. Success is NOT taken
-// from the exit code (rmu/adu report per-user failures and still exit 0); the
-// caller verifies by reading the live list back.
+// applyLive adds users on the running Xray. Success is NOT taken from the exit
+// code (adu reports per-user failures and still exits 0); the caller verifies
+// by reading the live list back. Removals never take this path (see Apply).
 func applyLive(p LivePlan) error {
-	if len(p.Remove) > 0 {
-		args := append([]string{"api", "rmu", "--server=" + APIAddr, "-tag=" + InboundTag}, p.Remove...)
-		if _, err := runXray(args...); err != nil {
-			return err
-		}
-	}
 	if len(p.Add) == 0 {
 		return nil
 	}

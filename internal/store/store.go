@@ -88,6 +88,9 @@ func Open(dataDir string) (*Store, error) {
 	// existed, so every user has a public /base64/<token> URL. Persist only if we
 	// changed something (don't bump ConfigVersion — a token is node-local, not a
 	// data-plane change the main needs to pull).
+	if err := s.initFile(); err != nil {
+		return nil, err
+	}
 	err := s.mutate(func(st *State) (bool, error) {
 		changed := false
 		for i := range st.Users {
@@ -108,12 +111,16 @@ func Open(dataDir string) (*Store, error) {
 	return s, nil
 }
 
-// loadLocked (re)reads the file into s.st. A missing file is an empty state.
+// errNoState: the state file is gone. Open creates it, so afterwards this means
+// it was moved/deleted — never treat that as "no users" (Apply would then
+// remove every user from Xray).
+var errNoState = fmt.Errorf("state file missing")
+
+// loadLocked (re)reads the file into s.st.
 func (s *Store) loadLocked() error {
 	b, err := os.ReadFile(s.path)
 	if os.IsNotExist(err) {
-		s.st = State{}
-		return nil
+		return errNoState
 	}
 	if err != nil {
 		return fmt.Errorf("read state: %w", err)
@@ -124,6 +131,25 @@ func (s *Store) loadLocked() error {
 	}
 	s.st = st
 	return nil
+}
+
+// initFile creates an empty state file under the flock if none exists yet
+// (fresh node). This is the only place a missing file means "empty".
+func (s *Store) initFile() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := flock.Lock(s.path + ".lock")
+	if err != nil {
+		return fmt.Errorf("lock state: %w", err)
+	}
+	defer unlock()
+	if _, err := os.Stat(s.path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat state: %w", err)
+	}
+	s.st = State{}
+	return s.flushLocked()
 }
 
 // refreshLocked re-reads the file under the flock so reads see the other
