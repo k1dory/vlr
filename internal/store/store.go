@@ -8,8 +8,9 @@
 // The file is shared by two processes — the long-running daemon and short CLI
 // invocations (`vlr user add`). Every mutation is therefore a transaction: take
 // an exclusive flock, re-read the file, apply the change, write it back. Reads
-// pick up changes made by the other process (stat-based refresh). Without this
-// the daemon's periodic traffic flush overwrote users the CLI had just added.
+// also re-read the file under the flock (it is small), so they never serve a
+// stale copy. Without this the daemon's periodic traffic flush overwrote users
+// the CLI had just added.
 package store
 
 import (
@@ -72,10 +73,6 @@ type Store struct {
 	path string
 	mu   sync.Mutex
 	st   State
-	// modTime/size of the file as last loaded or written; a mismatch on stat
-	// means another process changed it.
-	modTime time.Time
-	size    int64
 }
 
 // Open loads (or creates) the state file at <dataDir>/state.json.
@@ -115,7 +112,7 @@ func Open(dataDir string) (*Store, error) {
 func (s *Store) loadLocked() error {
 	b, err := os.ReadFile(s.path)
 	if os.IsNotExist(err) {
-		s.st, s.modTime, s.size = State{}, time.Time{}, 0
+		s.st = State{}
 		return nil
 	}
 	if err != nil {
@@ -126,23 +123,17 @@ func (s *Store) loadLocked() error {
 		return fmt.Errorf("parse state: %w", err)
 	}
 	s.st = st
-	s.rememberStatLocked()
 	return nil
 }
 
-func (s *Store) rememberStatLocked() {
-	if fi, err := os.Stat(s.path); err == nil {
-		s.modTime, s.size = fi.ModTime(), fi.Size()
-	}
-}
-
-// refreshLocked reloads the file if another process changed it since we last
-// loaded or wrote it. On error the in-memory copy is kept (best effort for reads).
+// refreshLocked re-reads the file under the flock so reads see the other
+// process's writes. On error the in-memory copy is kept (best effort for reads).
 func (s *Store) refreshLocked() {
-	fi, err := os.Stat(s.path)
-	if err != nil || (fi.ModTime().Equal(s.modTime) && fi.Size() == s.size) {
+	unlock, err := flock.Lock(s.path + ".lock")
+	if err != nil {
 		return
 	}
+	defer unlock()
 	_ = s.loadLocked()
 }
 
@@ -174,11 +165,7 @@ func (s *Store) flushLocked() error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		return err
-	}
-	s.rememberStatLocked()
-	return nil
+	return os.Rename(tmp, s.path)
 }
 
 // AddUser inserts a user and bumps ConfigVersion. Identity is the UUID (always

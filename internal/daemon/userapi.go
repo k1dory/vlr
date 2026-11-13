@@ -115,7 +115,7 @@ func createUser(w http.ResponseWriter, r *http.Request, cfg *config.Config, st *
 }
 
 func applyAndLog(cfg *config.Config, st *store.Store, log *slog.Logger) {
-	if err := xray.Apply(cfg, st.Users()); err != nil {
+	if err := xray.Apply(cfg, st); err != nil {
 		log.Warn("xray auto-apply failed", "err", err)
 	}
 }

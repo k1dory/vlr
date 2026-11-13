@@ -532,7 +532,7 @@ func applyXray(c *config.Config, st *store.Store, skip bool) {
 	if skip {
 		return
 	}
-	if err := xray.Apply(c, st.Users()); err != nil {
+	if err := xray.Apply(c, st); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ авто-применение Xray не удалось: %v\n", err)
 	} else if c.Xray.ConfigPath != "" {
 		fmt.Println("✓ Xray обновлён:", c.Xray.ConfigPath)

@@ -1,6 +1,7 @@
 package xray
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,20 @@ import (
 	"github.com/k1dory/vlr/internal/config"
 	"github.com/k1dory/vlr/internal/store"
 )
+
+// --- fixtures ---------------------------------------------------------------
+
+type src []store.User
+
+func (s src) Users() []store.User { return s }
+
+func users(emails ...string) src {
+	var out src
+	for _, e := range emails {
+		out = append(out, store.User{UUID: "id-" + e, Email: e, Enabled: true})
+	}
+	return out
+}
 
 func testCfg(t *testing.T) (*config.Config, string) {
 	t.Helper()
@@ -26,15 +41,7 @@ func testCfg(t *testing.T) (*config.Config, string) {
 	}, marker
 }
 
-func users(emails ...string) []store.User {
-	var out []store.User
-	for _, e := range emails {
-		out = append(out, store.User{UUID: "id-" + e, Email: e, Enabled: true})
-	}
-	return out
-}
-
-func render(t *testing.T, c *config.Config, u []store.User) []byte {
+func render(t *testing.T, c *config.Config, u src) []byte {
 	t.Helper()
 	b, err := Render(c, u)
 	if err != nil {
@@ -43,52 +50,138 @@ func render(t *testing.T, c *config.Config, u []store.User) []byte {
 	return b
 }
 
-func emailsOf(cl []map[string]any) []string {
+func reloaded(marker string) bool {
+	_, err := os.Stat(marker)
+	return err == nil
+}
+
+// fakeXray models the running Xray's user list behind the CLI.
+type fakeXray struct {
+	live      map[string]Client
+	down      bool // every API call fails
+	silentRmu bool // rmu exits 0 but removes nothing (per-user RPC error)
+	failAdu   bool
+	calls     []string
+}
+
+func newFake(t *testing.T, emails ...string) *fakeXray {
+	f := &fakeXray{live: map[string]Client{}}
+	for _, e := range emails {
+		f.live[e] = Client{ID: "id-" + e}
+	}
+	orig := runXray
+	runXray = f.run
+	t.Cleanup(func() { runXray = orig })
+	return f
+}
+
+func (f *fakeXray) run(args ...string) ([]byte, error) {
+	f.calls = append(f.calls, args[1])
+	if f.down {
+		return nil, errors.New("connection refused")
+	}
+	switch args[1] {
+	case "inbounduser":
+		type acc struct {
+			ID   string `json:"id"`
+			Flow string `json:"flow,omitempty"`
+		}
+		type u struct {
+			Email   string `json:"email,omitempty"`
+			Account acc    `json:"account"`
+		}
+		resp := struct {
+			Users []u `json:"users"`
+		}{}
+		for e, c := range f.live {
+			resp.Users = append(resp.Users, u{Email: e, Account: acc{ID: c.ID, Flow: c.Flow}})
+		}
+		return json.Marshal(resp)
+	case "rmu":
+		if !f.silentRmu {
+			for _, e := range args[4:] {
+				delete(f.live, e)
+			}
+		}
+		return []byte("removed"), nil
+	case "adu":
+		if f.failAdu {
+			return nil, errors.New("adu failed")
+		}
+		b, err := os.ReadFile(args[3])
+		if err != nil {
+			return nil, err
+		}
+		var cfg struct {
+			Inbounds []struct {
+				Settings struct {
+					Clients []struct{ ID, Email, Flow string } `json:"clients"`
+				} `json:"settings"`
+			} `json:"inbounds"`
+		}
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			return nil, err
+		}
+		for _, c := range cfg.Inbounds[0].Settings.Clients {
+			f.live[c.Email] = Client{ID: c.ID, Flow: c.Flow}
+		}
+		return []byte("added"), nil
+	}
+	return nil, errors.New("unexpected " + args[1])
+}
+
+func (f *fakeXray) emails() []string {
 	var out []string
-	for _, c := range cl {
-		out = append(out, c["email"].(string))
+	for e := range f.live {
+		out = append(out, e)
+	}
+	return sortedCopy(out)
+}
+
+func sortedCopy(s []string) []string {
+	out := append([]string(nil), s...)
+	for i := range out {
+		for j := i + 1; j < len(out); j++ {
+			if out[j] < out[i] {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
 	}
 	return out
 }
 
-func TestPlanLive(t *testing.T) {
-	c, _ := testCfg(t)
-	base := render(t, c, users("a", "b"))
+// --- pure helpers -------------------------------------------------------------
 
-	p, err := PlanLive(base, base)
-	if err != nil || !p.Noop() {
-		t.Fatalf("identical: %+v %v", p, err)
+func TestDiff(t *testing.T) {
+	live := map[string]Client{"a": {ID: "1"}, "b": {ID: "2"}, "c": {ID: "3"}}
+	desired := map[string]Client{"a": {ID: "1"}, "b": {ID: "2", Flow: "xtls-rprx-vision"}, "d": {ID: "4"}}
+	p := Diff(live, desired)
+	if !reflect.DeepEqual(p.Remove, []string{"b", "c"}) {
+		t.Fatalf("remove %v", p.Remove)
 	}
-
-	p, _ = PlanLive(base, render(t, c, users("a", "b", "c")))
-	if !p.ClientsOnly || len(p.Remove) != 0 || !reflect.DeepEqual(emailsOf(p.Add), []string{"c"}) {
-		t.Fatalf("add: %+v", p)
+	var add []string
+	for _, c := range p.Add {
+		add = append(add, c["email"].(string))
 	}
-
-	p, _ = PlanLive(base, render(t, c, users("a")))
-	if !p.ClientsOnly || !reflect.DeepEqual(p.Remove, []string{"b"}) || len(p.Add) != 0 {
-		t.Fatalf("remove: %+v", p)
+	if !reflect.DeepEqual(add, []string{"b", "d"}) || p.Add[0]["flow"] != "xtls-rprx-vision" {
+		t.Fatalf("add %v", p.Add)
 	}
-
-	// Changed client (vision flow) = remove + add of the same email.
-	u := users("a", "b")
-	u[1].Profile = "vision"
-	p, _ = PlanLive(base, render(t, c, u))
-	if !reflect.DeepEqual(p.Remove, []string{"b"}) || !reflect.DeepEqual(emailsOf(p.Add), []string{"b"}) {
-		t.Fatalf("change: %+v", p)
-	}
-
-	// Non-client change (split list) must not be patched live.
-	c2 := *c
-	c2.Split.RUDirect = []string{"vk.com", "ok.ru"}
-	p, _ = PlanLive(base, render(t, &c2, users("a", "b")))
-	if p.ClientsOnly || p.Noop() {
-		t.Fatalf("routing change treated as clients-only: %+v", p)
+	if !Diff(desired, desired).Empty() {
+		t.Fatal("identical must be empty")
 	}
 }
 
-func TestPlanLiveRejectsUnsafeConfigs(t *testing.T) {
-	good := `{"inbounds":[{"tag":"vless-reality","settings":{"clients":[{"id":"1","email":"a"}]}}]}`
+func TestSameExceptClients(t *testing.T) {
+	c, _ := testCfg(t)
+	a := render(t, c, users("a"))
+	if ok, err := SameExceptClients(a, render(t, c, users("a", "b"))); !ok || err != nil {
+		t.Fatalf("clients-only change: %v %v", ok, err)
+	}
+	c2 := *c
+	c2.Split.RUDirect = []string{"vk.com", "ok.ru"}
+	if ok, _ := SameExceptClients(a, render(t, &c2, users("a"))); ok {
+		t.Fatal("routing change reported as clients-only")
+	}
 	for name, bad := range map[string]string{
 		"no inbound":  `{"inbounds":[{"tag":"other"}]}`,
 		"dup email":   `{"inbounds":[{"tag":"vless-reality","settings":{"clients":[{"id":"1","email":"a"},{"id":"2","email":"a"}]}}]}`,
@@ -96,123 +189,181 @@ func TestPlanLiveRejectsUnsafeConfigs(t *testing.T) {
 		"not json":    `{`,
 		"no settings": `{"inbounds":[{"tag":"vless-reality"}]}`,
 	} {
-		if _, err := PlanLive([]byte(bad), []byte(good)); err == nil {
+		if _, err := SameExceptClients([]byte(bad), a); err == nil {
 			t.Errorf("%s: want error", name)
 		}
 	}
 }
 
-// stubXray records CLI calls and optionally fails.
-func stubXray(t *testing.T, fail error) *[][]string {
-	t.Helper()
-	var calls [][]string
-	orig := runXray
-	runXray = func(args ...string) error {
-		calls = append(calls, append([]string(nil), args...))
-		return fail
+func TestParseLiveUsersSkipsPlaceholder(t *testing.T) {
+	m, err := parseLiveUsers([]byte(`{"users":[{}, {"account":{"id":"1","flow":"xtls-rprx-vision"},"email":"a"}]}`))
+	if err != nil || len(m) != 1 || m["a"] != (Client{ID: "1", Flow: "xtls-rprx-vision"}) {
+		t.Fatalf("got %v %v", m, err)
 	}
-	t.Cleanup(func() { runXray = orig })
-	return &calls
 }
 
-func reloaded(marker string) bool {
-	_, err := os.Stat(marker)
-	return err == nil
-}
+// --- Apply against a fake running Xray ----------------------------------------
 
 func TestApplyAddsUserLiveWithoutRestart(t *testing.T) {
 	c, marker := testCfg(t)
-	if err := os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	calls := stubXray(t, nil)
+	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
+	f := newFake(t, "a")
 	if err := Apply(c, users("a", "b")); err != nil {
 		t.Fatal(err)
 	}
-	if reloaded(marker) {
-		t.Fatal("xray restarted on a user-only change")
-	}
-	if len(*calls) != 1 || (*calls)[0][1] != "adu" {
-		t.Fatalf("want one adu call, got %v", *calls)
+	if reloaded(marker) || !reflect.DeepEqual(f.emails(), []string{"a", "b"}) {
+		t.Fatalf("restart=%v live=%v", reloaded(marker), f.emails())
 	}
 	got, _ := os.ReadFile(c.Xray.ConfigPath)
 	if string(got) != string(render(t, c, users("a", "b"))) {
-		t.Fatal("config file not updated after live apply")
+		t.Fatal("file not updated")
 	}
 }
 
 func TestApplyRemovesUserLive(t *testing.T) {
 	c, marker := testCfg(t)
 	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a", "b")), 0o644)
-	calls := stubXray(t, nil)
+	f := newFake(t, "a", "b")
 	if err := Apply(c, users("a")); err != nil {
 		t.Fatal(err)
 	}
-	if reloaded(marker) || len(*calls) != 1 || (*calls)[0][1] != "rmu" || (*calls)[0][len((*calls)[0])-1] != "b" {
-		t.Fatalf("want rmu b without restart, calls=%v reloaded=%v", *calls, reloaded(marker))
+	if reloaded(marker) || !reflect.DeepEqual(f.emails(), []string{"a"}) {
+		t.Fatalf("restart=%v live=%v", reloaded(marker), f.emails())
 	}
 }
 
-func TestApplyNoopWhenUnchanged(t *testing.T) {
+func TestApplyNoopTouchesNothing(t *testing.T) {
 	c, marker := testCfg(t)
 	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
-	calls := stubXray(t, nil)
+	f := newFake(t, "a")
 	if err := Apply(c, users("a")); err != nil {
 		t.Fatal(err)
 	}
-	if reloaded(marker) || len(*calls) != 0 {
-		t.Fatalf("unchanged config touched xray: calls=%v reloaded=%v", *calls, reloaded(marker))
+	if reloaded(marker) || strings.Join(f.calls, ",") != "inbounduser" {
+		t.Fatalf("restart=%v calls=%v", reloaded(marker), f.calls)
 	}
 }
 
-func TestApplyFallsBackToRestartWhenAPIFails(t *testing.T) {
+// Review finding 1: rmu reports per-user failure but exits 0.
+func TestApplySilentRPCFailureFallsBackToRestart(t *testing.T) {
+	c, marker := testCfg(t)
+	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a", "b")), 0o644)
+	f := newFake(t, "a", "b")
+	f.silentRmu = true
+	if err := Apply(c, users("a")); err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded(marker) {
+		t.Fatal("revoked user still live and no restart")
+	}
+}
+
+func TestApplyAduFailureFallsBackToRestart(t *testing.T) {
 	c, marker := testCfg(t)
 	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
-	stubXray(t, errors.New("connection refused"))
+	f := newFake(t, "a")
+	f.failAdu = true
 	if err := Apply(c, users("a", "b")); err != nil {
 		t.Fatal(err)
 	}
 	if !reloaded(marker) {
-		t.Fatal("API failure must fall back to restart")
+		t.Fatal("adu failure must restart")
 	}
-	got, _ := os.ReadFile(c.Xray.ConfigPath)
-	if !strings.Contains(string(got), `"id-b"`) {
-		t.Fatal("config not written on fallback")
+}
+
+// Review finding 2a: file already says {a} but Xray still runs {a,b} (an earlier
+// write failed after a live add). The next Apply must remove b.
+func TestApplyComparesAgainstLiveNotFile(t *testing.T) {
+	c, marker := testCfg(t)
+	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
+	f := newFake(t, "a", "b")
+	if err := Apply(c, users("a")); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded(marker) || !reflect.DeepEqual(f.emails(), []string{"a"}) {
+		t.Fatalf("stale live user kept: live=%v", f.emails())
+	}
+}
+
+// Review finding 2b: a restart that failed must be retried even if the file
+// already matches.
+func TestApplyRetriesFailedRestart(t *testing.T) {
+	c, marker := testCfg(t)
+	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
+	newFake(t, "a")
+	c.Split.RUDirect = append(c.Split.RUDirect, "ok.ru")
+	c.Xray.ReloadCmd = "false"
+	if err := Apply(c, users("a")); err == nil {
+		t.Fatal("want reload error")
+	}
+	c.Xray.ReloadCmd = "touch " + marker
+	if err := Apply(c, users("a")); err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded(marker) {
+		t.Fatal("identical retry after a failed restart must restart")
+	}
+	if _, err := os.Stat(c.Xray.ConfigPath + ".pending"); !os.IsNotExist(err) {
+		t.Fatal("pending marker not cleared after successful restart")
+	}
+}
+
+func TestApplyXrayDownRestarts(t *testing.T) {
+	c, marker := testCfg(t)
+	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
+	f := newFake(t, "a")
+	f.down = true
+	if err := Apply(c, users("a")); err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded(marker) {
+		t.Fatal("stopped Xray with a matching file must be restarted")
 	}
 }
 
 func TestApplyRestartsOnNonClientChange(t *testing.T) {
 	c, marker := testCfg(t)
 	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
-	calls := stubXray(t, nil)
+	f := newFake(t, "a")
 	c.Split.RUDirect = append(c.Split.RUDirect, "ok.ru")
 	if err := Apply(c, users("a")); err != nil {
 		t.Fatal(err)
 	}
-	if !reloaded(marker) || len(*calls) != 0 {
-		t.Fatalf("routing change: want restart and no API calls, calls=%v", *calls)
+	if !reloaded(marker) || len(f.calls) != 0 {
+		t.Fatalf("routing change: restart=%v calls=%v", reloaded(marker), f.calls)
 	}
 }
 
-func TestApplyForceAlwaysRestarts(t *testing.T) {
+func TestApplyForceAndFirstWriteRestart(t *testing.T) {
 	c, marker := testCfg(t)
+	newFake(t)
+	if err := Apply(c, users("a")); err != nil || !reloaded(marker) {
+		t.Fatalf("first write must restart: %v", err)
+	}
+	os.Remove(marker)
+	if err := ApplyForce(c, users("a")); err != nil || !reloaded(marker) {
+		t.Fatalf("ApplyForce must restart: %v", err)
+	}
+}
+
+// Review finding 3: the snapshot is taken under the apply lock, so Apply always
+// renders the source's current users, never a list captured before locking.
+type countingSrc struct {
+	calls int
+	u     src
+}
+
+func (c *countingSrc) Users() []store.User { c.calls++; return c.u }
+
+func TestApplyReadsUsersUnderLock(t *testing.T) {
+	c, _ := testCfg(t)
 	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
-	stubXray(t, nil)
-	if err := ApplyForce(c, users("a")); err != nil {
+	f := newFake(t, "a", "b")
+	s := &countingSrc{u: users("a")}
+	if err := Apply(c, s); err != nil {
 		t.Fatal(err)
 	}
-	if !reloaded(marker) {
-		t.Fatal("ApplyForce must restart")
-	}
-}
-
-func TestApplyFirstWriteRestarts(t *testing.T) {
-	c, marker := testCfg(t)
-	stubXray(t, nil)
-	if err := Apply(c, users("a")); err != nil {
-		t.Fatal(err)
-	}
-	if !reloaded(marker) {
-		t.Fatal("no previous config: must write and restart")
+	if s.calls != 1 || !reflect.DeepEqual(f.emails(), []string{"a"}) {
+		t.Fatalf("calls=%d live=%v", s.calls, f.emails())
 	}
 }
