@@ -172,6 +172,31 @@ func TestSnapshotFailsWhenStateFileVanishes(t *testing.T) {
 	if err := s.AddUser(User{UUID: "u2", Email: "b@x"}); err == nil {
 		t.Fatal("mutation on a vanished state file must fail, not start from empty")
 	}
+	// A new process (CLI) must not recreate an empty store either.
+	if _, err := Open(dir); err == nil {
+		t.Fatal("Open recreated an empty store on an initialized node")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state.json")); !os.IsNotExist(err) {
+		t.Fatal("state.json was recreated")
+	}
+}
+
+func TestOpenAddsMarkerToExistingNode(t *testing.T) {
+	dir := t.TempDir()
+	// Pre-marker node: state file exists, no marker.
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"users":[{"uuid":"u1","email":"a@x","sub_token":"t"}],"config_version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".initialized")); err != nil {
+		t.Fatal("marker not written for an existing node")
+	}
+	os.Remove(filepath.Join(dir, "state.json"))
+	if _, err := Open(dir); err == nil {
+		t.Fatal("lost state on a migrated node must fail")
+	}
 }
 
 func TestOpenCreatesEmptyStateFile(t *testing.T) {

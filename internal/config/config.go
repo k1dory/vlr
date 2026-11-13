@@ -139,8 +139,10 @@ type XrayConfig struct {
 	// ConfigPath is where the rendered Xray config is written. Empty disables
 	// auto-apply (you'd run `vlr render` yourself).
 	ConfigPath string `json:"config_path"`
-	// ReloadCmd is run after writing the config. Empty => try `systemctl reload
-	// xray` and fall back to `systemctl restart xray`.
+	// ReloadCmd (legacy name) is the command that FULLY restarts Xray after a
+	// config write; a soft reload is not enough, because revoking a user must end
+	// their established sessions. Empty => `systemctl restart xray`; with no
+	// systemctl and no command, applying a non-additive change fails.
 	ReloadCmd string `json:"reload_cmd"`
 }
 

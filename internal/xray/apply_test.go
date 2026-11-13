@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -422,5 +423,23 @@ func TestApplySilentAduFailureRestarts(t *testing.T) {
 	got, _ := os.ReadFile(c.Xray.ConfigPath)
 	if !strings.Contains(string(got), `"id-c"`) {
 		t.Fatal("restart path must write the desired config")
+	}
+}
+
+// Review pass 4, finding 1: with no way to fully restart, Apply must fail and
+// keep .pending rather than report a revocation as applied.
+func TestRestartUnavailableKeepsPending(t *testing.T) {
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		t.Skip("host has systemctl")
+	}
+	c, _ := testCfg(t)
+	c.Xray.ReloadCmd = ""
+	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a", "b")), 0o644)
+	newFake(t, "a", "b")
+	if err := Apply(c, users("a")); err == nil {
+		t.Fatal("want error when Xray cannot be restarted")
+	}
+	if _, err := os.Stat(c.Xray.ConfigPath + ".pending"); err != nil {
+		t.Fatal(".pending must stay after a failed restart")
 	}
 }

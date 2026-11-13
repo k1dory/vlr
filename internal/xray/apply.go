@@ -147,7 +147,7 @@ func restartWith(c *config.Config, b []byte, pending string) error {
 	if err := writeAtomic(c.Xray.ConfigPath, b); err != nil {
 		return err
 	}
-	if err := reload(c.Xray.ReloadCmd); err != nil {
+	if err := restart(c.Xray.ReloadCmd); err != nil {
 		return err // marker stays: next Apply restarts again
 	}
 	_ = os.Remove(pending)
@@ -340,18 +340,18 @@ func writeAtomic(path string, b []byte) error {
 	return nil
 }
 
-// reload restarts/reloads Xray. With an explicit ReloadCmd it runs that; else it
-// tries `systemctl reload xray` and falls back to `systemctl restart xray`.
-func reload(cmd string) error {
+// restart fully restarts Xray — a reload is not enough: revocation must end
+// established sessions. With an explicit ReloadCmd (config xray.reload_cmd) it
+// runs that, and that command must perform a full restart; otherwise it runs
+// `systemctl restart xray`. With neither available it fails, so the .pending
+// marker stays and the change is not reported as applied.
+func restart(cmd string) error {
 	if cmd != "" {
 		parts := strings.Fields(cmd)
 		return runQuiet(parts[0], parts[1:]...)
 	}
 	if _, err := exec.LookPath("systemctl"); err != nil {
-		return nil // no systemd (dev/Windows) — config written, nothing to reload
-	}
-	if runQuiet("systemctl", "reload", "xray") == nil {
-		return nil
+		return fmt.Errorf("cannot restart xray: no systemctl and no xray.reload_cmd configured")
 	}
 	return runQuiet("systemctl", "restart", "xray")
 }

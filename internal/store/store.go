@@ -133,8 +133,13 @@ func (s *Store) loadLocked() error {
 	return nil
 }
 
-// initFile creates an empty state file under the flock if none exists yet
-// (fresh node). This is the only place a missing file means "empty".
+// initMarker records that this data dir has had a state file. A missing
+// state.json is "fresh node" only while the marker is absent; afterwards it is
+// lost state and every open fails instead of silently starting empty.
+const initMarker = ".initialized"
+
+// initFile creates an empty state file under the flock on a fresh node, and the
+// init marker on any node (existing nodes get it on first open).
 func (s *Store) initFile() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -143,13 +148,31 @@ func (s *Store) initFile() error {
 		return fmt.Errorf("lock state: %w", err)
 	}
 	defer unlock()
+	marker := filepath.Join(filepath.Dir(s.path), initMarker)
+	_, merr := os.Stat(marker)
 	if _, err := os.Stat(s.path); err == nil {
+		if os.IsNotExist(merr) {
+			return writeMarker(marker)
+		}
 		return nil
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("stat state: %w", err)
 	}
+	if merr == nil {
+		return fmt.Errorf("%w: %s (node was initialized; restore it from backup — not starting empty)", errNoState, s.path)
+	}
 	s.st = State{}
-	return s.flushLocked()
+	if err := s.flushLocked(); err != nil {
+		return err
+	}
+	return writeMarker(marker)
+}
+
+func writeMarker(path string) error {
+	if err := os.WriteFile(path, []byte("vlr state initialized\n"), 0o600); err != nil {
+		return fmt.Errorf("write init marker: %w", err)
+	}
+	return nil
 }
 
 // refreshLocked re-reads the file under the flock so reads see the other
