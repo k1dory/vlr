@@ -130,7 +130,9 @@ func Render(c *config.Config, users []store.User) ([]byte, error) {
 			"tag": "api",
 			// RoutingService lets the device limiter add per-(user,ip) block
 			// rules at runtime without restarting Xray. Loopback-only (api-in).
-			"services": []string{"StatsService", "RoutingService"},
+			// HandlerService adds/removes users on the live inbound (Apply), so a
+			// user change never restarts Xray.
+			"services": []string{"StatsService", "RoutingService", "HandlerService"},
 		},
 		"inbounds": []any{
 			map[string]any{

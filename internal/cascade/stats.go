@@ -55,13 +55,14 @@ func (x XrayStats) Poll(ctx context.Context, s *store.Store) error {
 		return err
 	}
 
-	var firstErr error
+	batch := make(map[string]store.Traffic, len(agg))
 	for id, c := range agg {
-		if err := s.UpdateTraffic(id, c.Rx, c.Tx); err != nil && firstErr == nil {
-			firstErr = err // user may have just been removed; keep going
-		}
+		batch[id] = store.Traffic{Rx: c.Rx, Tx: c.Tx}
 	}
-	return firstErr
+	// Unknown stat ids (a client Xray still has but the store does not) are
+	// skipped: they are a config drift, not a polling failure.
+	_, err = s.UpdateTrafficBatch(batch)
+	return err
 }
 
 // userTraffic is one user's cumulative counters (Rx = downlink, Tx = uplink).

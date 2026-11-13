@@ -12,16 +12,21 @@ import (
 
 // startDeviceLimit runs the per-user device limiter in the background when the
 // node has limits.max_devices > 0 and an Xray binary to talk to.
+//
+// Runtime ban rules live only in Xray and the previous daemon's memory, so on
+// every start (limit on or off) they are cleared first: `vlr limit off`, a raised
+// limit or a new exemption must not leave bans behind.
 func startDeviceLimit(ctx context.Context, cfg *config.Config, log *slog.Logger) {
 	l := cfg.Limits
-	if l.MaxDevices <= 0 {
-		return
-	}
 	if _, err := exec.LookPath("xray"); err != nil {
-		log.Warn("device limit configured but xray not found; not enforcing", "max_devices", l.MaxDevices)
+		if l.MaxDevices > 0 {
+			log.Warn("device limit configured but xray not found; not enforcing", "max_devices", l.MaxDevices)
+		}
 		return
 	}
-	p := devlimit.Policy{Max: l.MaxDevices, Ban: time.Duration(l.BanSeconds) * time.Second, Exempt: l.Exempt}
 	x := devlimit.Xray{ConfigPath: cfg.Xray.ConfigPath}
+	p := devlimit.Policy{Max: l.MaxDevices, Ban: time.Duration(l.BanSeconds) * time.Second, Exempt: l.Exempt}
+	// One worker owns the live ban rules: it first clears leftovers (retrying
+	// until that succeeds), then enforces if a limit is set.
 	go devlimit.Run(ctx, log, p, x, time.Duration(l.CheckSeconds)*time.Second)
 }

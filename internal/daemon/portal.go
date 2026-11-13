@@ -97,7 +97,7 @@ func provisionPortalUser(cfg *config.Config, st *store.Store, email string, log 
 		}
 		return store.User{}, err
 	}
-	if err := xray.Apply(cfg, st.Users()); err != nil {
+	if err := xray.Apply(cfg, st); err != nil {
 		log.Warn("xray auto-apply failed", "err", err)
 	}
 	stored, _ := st.FindUser(email)

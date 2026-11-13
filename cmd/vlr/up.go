@@ -57,11 +57,12 @@ func cmdUp(args []string) error {
 	if c.Xray.ConfigPath == "" {
 		c.Xray.ConfigPath = "/usr/local/etc/xray/config.json"
 	}
-	if err := xray.Apply(c, st.Users()); err != nil {
+	_ = exec.Command("systemctl", "enable", "xray").Run()
+	// ApplyForce writes and restarts under the apply lock; no extra restart here
+	// (an unlocked restart could load a config another process is mid-patching).
+	if err := xray.ApplyForce(c, st); err != nil {
 		return fmt.Errorf("apply xray: %w", err)
 	}
-	_ = exec.Command("systemctl", "enable", "xray").Run()
-	_ = exec.Command("systemctl", "restart", "xray").Run()
 	fmt.Println("✓ Xray применён:", c.Xray.ConfigPath)
 
 	verifyXray(c)

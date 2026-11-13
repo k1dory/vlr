@@ -71,7 +71,7 @@ func (a *authentikReconciler) reconcileOnce(ctx context.Context) {
 	}
 	removed := a.prune(active)
 	if removed > 0 {
-		if err := xray.Apply(a.cfg, a.store.Users()); err != nil {
+		if err := xray.Apply(a.cfg, a.store); err != nil {
 			a.log.Warn("authentik reconcile: xray apply failed", "err", err)
 		}
 		a.log.Info("authentik reconcile: revoked deactivated users", "removed", removed, "active", len(active))

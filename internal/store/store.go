@@ -1,9 +1,16 @@
 // Package store persists node-local state for standalone and child roles.
 //
 // We deliberately avoid an external database here: a node's local state is tiny
-// (a list of clients, a usage counter) and a JSON file under DataDir with a
-// process-wide mutex is enough and keeps the binary dependency-free. The main
-// server aggregates everything and is where a real PostgreSQL lives.
+// (a list of clients, a usage counter) and a JSON file under DataDir is enough
+// and keeps the binary dependency-free. The main server aggregates everything
+// and is where a real PostgreSQL lives.
+//
+// The file is shared by two processes — the long-running daemon and short CLI
+// invocations (`vlr user add`). Every mutation is therefore a transaction: take
+// an exclusive flock, re-read the file, apply the change, write it back. Reads
+// also re-read the file under the flock (it is small), so they never serve a
+// stale copy. Without this the daemon's periodic traffic flush overwrote users
+// the CLI had just added.
 package store
 
 import (
@@ -14,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/k1dory/vlr/internal/flock"
 	"github.com/k1dory/vlr/internal/util"
 )
 
@@ -59,7 +67,8 @@ type State struct {
 	ConfigVersion int64 `json:"config_version"`
 }
 
-// Store is a JSON-file-backed state store, safe for concurrent use.
+// Store is a JSON-file-backed state store, safe for concurrent use within a
+// process and across processes (see package doc).
 type Store struct {
 	path string
 	mu   sync.Mutex
@@ -75,37 +84,129 @@ func Open(dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("mkdir data dir: %w", err)
 	}
 	s := &Store{path: filepath.Join(dataDir, "state.json")}
-	b, err := os.ReadFile(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return s, nil // fresh
-		}
-		return nil, fmt.Errorf("read state: %w", err)
+	// Load, and backfill subscription tokens for users created before sub_token
+	// existed, so every user has a public /base64/<token> URL. Persist only if we
+	// changed something (don't bump ConfigVersion — a token is node-local, not a
+	// data-plane change the main needs to pull).
+	if err := s.initFile(); err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal(b, &s.st); err != nil {
-		return nil, fmt.Errorf("parse state: %w", err)
-	}
-	// Backfill subscription tokens for users created before sub_token existed, so
-	// every user has a public /base64/<token> URL. Persist only if we changed
-	// something (don't bump ConfigVersion — a token is node-local, not a data-plane
-	// change the main needs to pull).
-	changed := false
-	for i := range s.st.Users {
-		if s.st.Users[i].SubToken == "" {
-			tok, err := util.RandHex(subTokenBytes)
-			if err != nil {
-				return nil, fmt.Errorf("gen sub token: %w", err)
+	err := s.mutate(func(st *State) (bool, error) {
+		changed := false
+		for i := range st.Users {
+			if st.Users[i].SubToken == "" {
+				tok, err := util.RandHex(subTokenBytes)
+				if err != nil {
+					return false, fmt.Errorf("gen sub token: %w", err)
+				}
+				st.Users[i].SubToken = tok
+				changed = true
 			}
-			s.st.Users[i].SubToken = tok
-			changed = true
 		}
-	}
-	if changed {
-		if err := s.flushLocked(); err != nil {
-			return nil, fmt.Errorf("persist backfilled tokens: %w", err)
-		}
+		return changed, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return s, nil
+}
+
+// errNoState: the state file is gone. Open creates it, so afterwards this means
+// it was moved/deleted — never treat that as "no users" (Apply would then
+// remove every user from Xray).
+var errNoState = fmt.Errorf("state file missing")
+
+// loadLocked (re)reads the file into s.st.
+func (s *Store) loadLocked() error {
+	b, err := os.ReadFile(s.path)
+	if os.IsNotExist(err) {
+		return errNoState
+	}
+	if err != nil {
+		return fmt.Errorf("read state: %w", err)
+	}
+	var st State
+	if err := json.Unmarshal(b, &st); err != nil {
+		return fmt.Errorf("parse state: %w", err)
+	}
+	s.st = st
+	return nil
+}
+
+// initMarker records that this data dir has had a state file. A missing
+// state.json is "fresh node" only while the marker is absent; afterwards it is
+// lost state and every open fails instead of silently starting empty.
+const initMarker = ".initialized"
+
+// initFile creates an empty state file under the flock on a fresh node, and the
+// init marker on any node (existing nodes get it on first open).
+func (s *Store) initFile() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := flock.Lock(s.path + ".lock")
+	if err != nil {
+		return fmt.Errorf("lock state: %w", err)
+	}
+	defer unlock()
+	marker := filepath.Join(filepath.Dir(s.path), initMarker)
+	_, merr := os.Stat(marker)
+	if merr != nil && !os.IsNotExist(merr) {
+		// Can't tell whether this node was initialized: never guess "fresh".
+		return fmt.Errorf("stat init marker: %w", merr)
+	}
+	if _, err := os.Stat(s.path); err == nil {
+		if os.IsNotExist(merr) {
+			return writeMarker(marker)
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat state: %w", err)
+	}
+	if merr == nil {
+		return fmt.Errorf("%w: %s (node was initialized; restore it from backup — not starting empty)", errNoState, s.path)
+	}
+	s.st = State{}
+	if err := s.flushLocked(); err != nil {
+		return err
+	}
+	return writeMarker(marker)
+}
+
+func writeMarker(path string) error {
+	if err := os.WriteFile(path, []byte("vlr state initialized\n"), 0o600); err != nil {
+		return fmt.Errorf("write init marker: %w", err)
+	}
+	return nil
+}
+
+// refreshLocked re-reads the file under the flock so reads see the other
+// process's writes. On error the in-memory copy is kept (best effort for reads).
+func (s *Store) refreshLocked() {
+	unlock, err := flock.Lock(s.path + ".lock")
+	if err != nil {
+		return
+	}
+	defer unlock()
+	_ = s.loadLocked()
+}
+
+// mutate is the only write path: flock, fresh read, fn, write if changed.
+func (s *Store) mutate(fn func(st *State) (changed bool, err error)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := flock.Lock(s.path + ".lock")
+	if err != nil {
+		return fmt.Errorf("lock state: %w", err)
+	}
+	defer unlock()
+	if err := s.loadLocked(); err != nil {
+		return err
+	}
+	changed, err := fn(&s.st)
+	if err != nil || !changed {
+		return err
+	}
+	return s.flushLocked()
 }
 
 func (s *Store) flushLocked() error {
@@ -124,15 +225,6 @@ func (s *Store) flushLocked() error {
 // present); email/telegram are optional labels. Duplicate check is only applied
 // to a NON-EMPTY email — empty fields never cause a failure.
 func (s *Store) AddUser(u User) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if u.Email != "" {
-		for _, e := range s.st.Users {
-			if e.Email == u.Email {
-				return fmt.Errorf("user with email %q already exists", u.Email)
-			}
-		}
-	}
 	if u.CreatedAt.IsZero() {
 		u.CreatedAt = time.Now().UTC()
 	}
@@ -144,9 +236,18 @@ func (s *Store) AddUser(u User) error {
 		u.SubToken = tok
 	}
 	u.Enabled = true
-	s.st.Users = append(s.st.Users, u)
-	s.st.ConfigVersion++
-	return s.flushLocked()
+	return s.mutate(func(st *State) (bool, error) {
+		if u.Email != "" {
+			for _, e := range st.Users {
+				if e.Email == u.Email {
+					return false, fmt.Errorf("user with email %q already exists", u.Email)
+				}
+			}
+		}
+		st.Users = append(st.Users, u)
+		st.ConfigVersion++
+		return true, nil
+	})
 }
 
 // matchRef reports whether u is identified by ref (uuid, email, external id, or
@@ -164,6 +265,7 @@ func matchRef(u User, ref string) bool {
 func (s *Store) FindUser(ref string) (User, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.refreshLocked()
 	for _, u := range s.st.Users {
 		if matchRef(u, ref) {
 			return u, true
@@ -177,6 +279,7 @@ func (s *Store) FindUser(ref string) (User, bool) {
 func (s *Store) FindBySubToken(tok string) (User, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.refreshLocked()
 	if tok == "" {
 		return User{}, false
 	}
@@ -192,49 +295,64 @@ func (s *Store) FindBySubToken(tok string) (User, bool) {
 // revoking the old /base64/<token> URL. The VLESS credential (UUID) is untouched,
 // so the user keeps working once they re-import the new link. Returns the new token.
 func (s *Store) RotateSubToken(ref string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range s.st.Users {
-		if matchRef(s.st.Users[i], ref) {
-			tok, err := util.RandHex(subTokenBytes)
-			if err != nil {
-				return "", fmt.Errorf("gen sub token: %w", err)
-			}
-			s.st.Users[i].SubToken = tok
-			if err := s.flushLocked(); err != nil {
-				return "", err
-			}
-			return tok, nil
-		}
+	tok, err := util.RandHex(subTokenBytes)
+	if err != nil {
+		return "", fmt.Errorf("gen sub token: %w", err)
 	}
-	return "", fmt.Errorf("user %q not found", ref)
+	err = s.mutate(func(st *State) (bool, error) {
+		for i := range st.Users {
+			if matchRef(st.Users[i], ref) {
+				st.Users[i].SubToken = tok
+				return true, nil
+			}
+		}
+		return false, fmt.Errorf("user %q not found", ref)
+	})
+	if err != nil {
+		return "", err
+	}
+	return tok, nil
 }
 
 // RemoveUser deletes the user matching ref and bumps ConfigVersion.
 func (s *Store) RemoveUser(ref string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := s.st.Users[:0]
-	found := false
-	for _, e := range s.st.Users {
-		if !found && matchRef(e, ref) {
-			found = true
-			continue
+	return s.mutate(func(st *State) (bool, error) {
+		for i, e := range st.Users {
+			if matchRef(e, ref) {
+				st.Users = append(st.Users[:i:i], st.Users[i+1:]...)
+				st.ConfigVersion++
+				return true, nil
+			}
 		}
-		out = append(out, e)
-	}
-	if !found {
-		return fmt.Errorf("user %q not found", ref)
-	}
-	s.st.Users = out
-	s.st.ConfigVersion++
-	return s.flushLocked()
+		return false, fmt.Errorf("user %q not found", ref)
+	})
 }
 
-// Users returns a copy of the current user list.
+// Snapshot returns the user list read fresh from disk under the flock, or an
+// error — never a cached copy. Use it where acting on a stale list is unsafe
+// (rendering Xray: a stale list could re-authorize a revoked user).
+func (s *Store) Snapshot() ([]User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := flock.Lock(s.path + ".lock")
+	if err != nil {
+		return nil, fmt.Errorf("lock state: %w", err)
+	}
+	defer unlock()
+	if err := s.loadLocked(); err != nil {
+		return nil, err
+	}
+	out := make([]User, len(s.st.Users))
+	copy(out, s.st.Users)
+	return out, nil
+}
+
+// Users returns a copy of the current user list (best effort: on a read error
+// the last loaded copy is returned).
 func (s *Store) Users() []User {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.refreshLocked()
 	out := make([]User, len(s.st.Users))
 	copy(out, s.st.Users)
 	return out
@@ -244,6 +362,7 @@ func (s *Store) Users() []User {
 func (s *Store) ConfigVersion() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.refreshLocked()
 	return s.st.ConfigVersion
 }
 
@@ -252,6 +371,7 @@ func (s *Store) ConfigVersion() int64 {
 func (s *Store) TotalBytes() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.refreshLocked()
 	var t int64
 	for _, u := range s.st.Users {
 		t += u.RxBytes + u.TxBytes
@@ -259,20 +379,47 @@ func (s *Store) TotalBytes() int64 {
 	return t
 }
 
-// UpdateTraffic sets per-user counters (called by the stats poller). The ref is
-// the Xray per-client stat identity, which vlr renders as the user's email when
-// set, else its UUID (see xray.StatID) — so this matches on either, and a user
-// without an email is still accounted.
+// Traffic is one user's cumulative counters.
+type Traffic struct{ Rx, Tx int64 }
+
+// UpdateTraffic sets one user's counters; see UpdateTrafficBatch.
 func (s *Store) UpdateTraffic(ref string, rx, tx int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range s.st.Users {
-		u := &s.st.Users[i]
-		if u.UUID == ref || (u.Email != "" && u.Email == ref) {
-			u.RxBytes = rx
-			u.TxBytes = tx
-			return s.flushLocked()
-		}
+	unknown, err := s.UpdateTrafficBatch(map[string]Traffic{ref: {rx, tx}})
+	if err == nil && unknown > 0 {
+		return fmt.Errorf("user %q not found", ref)
 	}
-	return fmt.Errorf("user %q not found", ref)
+	return err
+}
+
+// UpdateTrafficBatch sets per-user counters in ONE transaction (called by the
+// stats poller). Keys are the Xray per-client stat identity, which vlr renders as
+// the user's email when set, else its UUID (see xray.StatID) — so this matches on
+// either. Returns how many keys matched no user (e.g. a client still in Xray
+// after removal); those are skipped, not an error. Writes only if a value changed.
+func (s *Store) UpdateTrafficBatch(m map[string]Traffic) (unknown int, err error) {
+	err = s.mutate(func(st *State) (bool, error) {
+		changed := false
+		matched := 0
+		for i := range st.Users {
+			u := &st.Users[i]
+			t, ok := m[u.UUID]
+			if !ok && u.Email != "" {
+				t, ok = m[u.Email]
+			}
+			if !ok {
+				continue
+			}
+			matched++
+			if u.RxBytes != t.Rx || u.TxBytes != t.Tx {
+				u.RxBytes, u.TxBytes = t.Rx, t.Tx
+				changed = true
+			}
+		}
+		unknown = len(m) - matched
+		if unknown < 0 {
+			unknown = 0
+		}
+		return changed, nil
+	})
+	return unknown, err
 }

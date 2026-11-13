@@ -79,7 +79,7 @@ func revokeAuthentikUser(cfg *config.Config, st *store.Store, log *slog.Logger, 
 		log.Warn("authentik webhook: remove failed", "email", email, "err", err)
 		return false
 	}
-	if err := xray.Apply(cfg, st.Users()); err != nil {
+	if err := xray.Apply(cfg, st); err != nil {
 		log.Warn("authentik webhook: xray apply failed", "err", err)
 	}
 	log.Info("authentik webhook: revoked user", "email", email)
