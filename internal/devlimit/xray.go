@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/k1dory/vlr/internal/flock"
 )
 
 // Xray talks to the local Xray API through its CLI (stdlib-only, like
@@ -140,6 +142,14 @@ func parseOnline(b []byte) (map[string][]string, error) {
 // config) keeps `vlr split add` edits intact. Replace, not append: ban rules must
 // come first to beat the split/egress rules, and a full replace is atomic.
 func (x Xray) ApplyBans(ctx context.Context, bans []Ban) error {
+	// Same cross-process lock as xray.Apply (xray.LockConfig): reading the
+	// static rules and replacing the live ones must not interleave with a config
+	// write + restart, or stale routing could be pushed over fresh routing.
+	unlock, err := flock.Lock(x.ConfigPath + ".lock")
+	if err != nil {
+		return fmt.Errorf("lock xray config: %w", err)
+	}
+	defer unlock()
 	raw, err := os.ReadFile(x.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("read xray config: %w", err)
@@ -200,43 +210,69 @@ func RuleTag(user, ip string) string {
 	return "vlr-devlimit-" + hex.EncodeToString(h[:6])
 }
 
-// Run drives the limiter until ctx is done. Bans are re-pushed every tick while
-// any exist, so they survive an Xray restart (e.g. `vlr user add`), and the
-// static rules are pushed once when the last ban lifts.
-func Run(ctx context.Context, log *slog.Logger, p Policy, x Xray, every time.Duration) {
+// Applier is what Run needs from Xray (Xray implements it; tests fake it).
+type Applier interface {
+	Online(ctx context.Context) (map[string][]string, error)
+	ApplyBans(ctx context.Context, bans []Ban) error
+}
+
+// Run is the single worker that owns the live ban rules, so pushes never race.
+//
+// Its first job is always to replace the live rules with the current (empty)
+// ban set — runtime bans from a previous daemon must not outlive a restart,
+// `limit off`, a raised limit or a new exemption. That push is retried every
+// tick until it succeeds. With p.Max <= 0 Run returns after that; otherwise it
+// keeps enforcing: bans are re-pushed every tick while any exist (they survive
+// an Xray restart), and the empty set is pushed when the last ban lifts.
+func Run(ctx context.Context, log *slog.Logger, p Policy, x Applier, every time.Duration) {
 	if every <= 0 {
 		every = 15 * time.Second
 	}
 	l := New(p)
+	if p.Max > 0 {
+		log.Info("device limit enabled", "exempt", len(p.Exempt), "max_devices", p.Max, "ban", l.policy.Ban.String(), "every", every.String())
+	}
 	t := time.NewTicker(every)
 	defer t.Stop()
-	log.Info("device limit enabled", "exempt", len(p.Exempt), "max_devices", p.Max, "ban", l.policy.Ban.String(), "every", every.String())
-	pushed := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		online, err := x.Online(ctx)
-		if err != nil {
-			log.Warn("device limit: read online ips", "err", err)
-			continue
-		}
-		bans, changed := l.Step(time.Now(), online)
-		if changed {
-			log.Info("device limit: bans changed", "active", len(bans))
-			for _, b := range bans {
-				log.Info("device limit: ban", "user", b.User, "ip", b.IP, "until", b.Until.Format(time.RFC3339))
+	needPush := true // live rules unknown until the first successful push
+	for first := true; ; first = false {
+		if !first {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
 			}
 		}
-		if len(bans) == 0 && pushed == 0 && !changed {
+		var bans []Ban
+		changed := false
+		if p.Max > 0 {
+			online, err := x.Online(ctx)
+			if err != nil {
+				log.Warn("device limit: read online ips", "err", err)
+				if !needPush {
+					continue
+				}
+			} else {
+				bans, changed = l.Step(time.Now(), online)
+			}
+			if changed {
+				log.Info("device limit: bans changed", "active", len(bans))
+				for _, b := range bans {
+					log.Info("device limit: ban", "user", b.User, "ip", b.IP, "until", b.Until.Format(time.RFC3339))
+				}
+			}
+		}
+		if !needPush && !changed && len(bans) == 0 {
 			continue // nothing to keep in sync
 		}
 		if err := x.ApplyBans(ctx, bans); err != nil {
 			log.Warn("device limit: apply bans", "err", err)
+			needPush = true
 			continue
 		}
-		pushed = len(bans)
+		needPush = false
+		if p.Max <= 0 {
+			return // stale bans cleared; nothing to enforce
+		}
 	}
 }

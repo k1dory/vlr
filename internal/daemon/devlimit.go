@@ -25,14 +25,8 @@ func startDeviceLimit(ctx context.Context, cfg *config.Config, log *slog.Logger)
 		return
 	}
 	x := devlimit.Xray{ConfigPath: cfg.Xray.ConfigPath}
-	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	if err := x.ApplyBans(cctx, nil); err != nil {
-		log.Warn("device limit: clearing stale bans failed", "err", err)
-	}
-	cancel()
-	if l.MaxDevices <= 0 {
-		return
-	}
 	p := devlimit.Policy{Max: l.MaxDevices, Ban: time.Duration(l.BanSeconds) * time.Second, Exempt: l.Exempt}
+	// One worker owns the live ban rules: it first clears leftovers (retrying
+	// until that succeeds), then enforces if a limit is set.
 	go devlimit.Run(ctx, log, p, x, time.Duration(l.CheckSeconds)*time.Second)
 }

@@ -17,7 +17,7 @@ import (
 
 type src []store.User
 
-func (s src) Users() []store.User { return s }
+func (s src) Snapshot() ([]store.User, error) { return s, nil }
 
 func users(emails ...string) src {
 	var out src
@@ -60,6 +60,7 @@ type fakeXray struct {
 	live      map[string]Client
 	down      bool // every API call fails
 	silentRmu bool // rmu exits 0 but removes nothing (per-user RPC error)
+	silentAdu bool // adu exits 0 but adds nothing
 	failAdu   bool
 	calls     []string
 }
@@ -107,6 +108,9 @@ func (f *fakeXray) run(args ...string) ([]byte, error) {
 	case "adu":
 		if f.failAdu {
 			return nil, errors.New("adu failed")
+		}
+		if f.silentAdu {
+			return []byte("added 0"), nil
 		}
 		b, err := os.ReadFile(args[3])
 		if err != nil {
@@ -346,24 +350,71 @@ func TestApplyForceAndFirstWriteRestart(t *testing.T) {
 	}
 }
 
-// Review finding 3: the snapshot is taken under the apply lock, so Apply always
-// renders the source's current users, never a list captured before locking.
-type countingSrc struct {
-	calls int
-	u     src
+// Review finding 3: the snapshot is taken while the apply lock is held.
+type lockCheckingSrc struct {
+	t      *testing.T
+	u      src
+	locked bool
 }
 
-func (c *countingSrc) Users() []store.User { c.calls++; return c.u }
+func (c *lockCheckingSrc) Snapshot() ([]store.User, error) {
+	c.locked = !applyMu.TryLock() // TryLock fails only if Apply holds it
+	if !c.locked {
+		applyMu.Unlock()
+	}
+	return c.u, nil
+}
 
 func TestApplyReadsUsersUnderLock(t *testing.T) {
 	c, _ := testCfg(t)
 	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
 	f := newFake(t, "a", "b")
-	s := &countingSrc{u: users("a")}
+	s := &lockCheckingSrc{t: t, u: users("a")}
 	if err := Apply(c, s); err != nil {
 		t.Fatal(err)
 	}
-	if s.calls != 1 || !reflect.DeepEqual(f.emails(), []string{"a"}) {
-		t.Fatalf("calls=%d live=%v", s.calls, f.emails())
+	if !s.locked {
+		t.Fatal("users were read without holding the apply lock")
+	}
+	if !reflect.DeepEqual(f.emails(), []string{"a"}) {
+		t.Fatalf("live=%v", f.emails())
+	}
+}
+
+// Re-review finding 1: an unreadable store must abort before touching Xray.
+type failingSrc struct{}
+
+func (failingSrc) Snapshot() ([]store.User, error) { return nil, errors.New("EIO") }
+
+func TestApplyAbortsWhenUsersUnreadable(t *testing.T) {
+	c, marker := testCfg(t)
+	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a")), 0o644)
+	f := newFake(t, "a", "b")
+	if err := Apply(c, failingSrc{}); err == nil {
+		t.Fatal("want error")
+	}
+	if reloaded(marker) || len(f.calls) != 0 {
+		t.Fatalf("touched xray on unreadable store: calls=%v", f.calls)
+	}
+	got, _ := os.ReadFile(c.Xray.ConfigPath)
+	if string(got) != string(render(t, c, users("a"))) {
+		t.Fatal("file changed on unreadable store")
+	}
+}
+
+func TestApplyRmuOkSilentAduFailureRestarts(t *testing.T) {
+	c, marker := testCfg(t)
+	_ = os.WriteFile(c.Xray.ConfigPath, render(t, c, users("a", "b")), 0o644)
+	f := newFake(t, "a", "b")
+	f.silentAdu = true
+	if err := Apply(c, users("a", "c")); err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded(marker) {
+		t.Fatal("partial live apply (rmu ok, adu silent no-op) must restart")
+	}
+	got, _ := os.ReadFile(c.Xray.ConfigPath)
+	if !strings.Contains(string(got), `"id-c"`) || strings.Contains(string(got), `"id-b"`) {
+		t.Fatal("restart path must write the desired config")
 	}
 }

@@ -23,12 +23,20 @@ const InboundTag = "vless-reality"
 const APIAddr = "127.0.0.1:10085"
 
 // UserSource yields the authoritative user list. Apply reads it only after
-// taking the apply lock, so a stale snapshot can never re-add a revoked user.
+// taking the apply lock, and aborts if it cannot be read fresh — a stale or
+// cached list could re-add a revoked user.
 type UserSource interface {
-	Users() []store.User
+	Snapshot() ([]store.User, error)
 }
 
 var applyMu sync.Mutex // serializes Apply within one process; flock covers processes
+
+// LockConfig takes the cross-process lock that guards the Xray config and its
+// live state. Everything that replaces live Xray state (Apply, device-limit
+// rule pushes) must hold it, so they never interleave.
+func LockConfig(configPath string) (func(), error) {
+	return flock.Lock(configPath + ".lock")
+}
 
 // Apply brings the running Xray in line with the store, as gently as possible:
 //
@@ -59,13 +67,17 @@ func apply(c *config.Config, src UserSource, force bool) error {
 	}
 	applyMu.Lock()
 	defer applyMu.Unlock()
-	unlock, err := flock.Lock(c.Xray.ConfigPath + ".lock")
+	unlock, err := LockConfig(c.Xray.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("lock xray config: %w", err)
 	}
 	defer unlock()
 
-	b, err := Render(c, src.Users()) // snapshot taken under the lock
+	users, err := src.Snapshot() // fresh, taken under the lock
+	if err != nil {
+		return fmt.Errorf("read users: %w", err)
+	}
+	b, err := Render(c, users)
 	if err != nil {
 		return fmt.Errorf("render xray config: %w", err)
 	}

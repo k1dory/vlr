@@ -275,7 +275,27 @@ func (s *Store) RemoveUser(ref string) error {
 	})
 }
 
-// Users returns a copy of the current user list.
+// Snapshot returns the user list read fresh from disk under the flock, or an
+// error — never a cached copy. Use it where acting on a stale list is unsafe
+// (rendering Xray: a stale list could re-authorize a revoked user).
+func (s *Store) Snapshot() ([]User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := flock.Lock(s.path + ".lock")
+	if err != nil {
+		return nil, fmt.Errorf("lock state: %w", err)
+	}
+	defer unlock()
+	if err := s.loadLocked(); err != nil {
+		return nil, err
+	}
+	out := make([]User, len(s.st.Users))
+	copy(out, s.st.Users)
+	return out, nil
+}
+
+// Users returns a copy of the current user list (best effort: on a read error
+// the last loaded copy is returned).
 func (s *Store) Users() []User {
 	s.mu.Lock()
 	defer s.mu.Unlock()
