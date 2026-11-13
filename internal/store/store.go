@@ -150,6 +150,10 @@ func (s *Store) initFile() error {
 	defer unlock()
 	marker := filepath.Join(filepath.Dir(s.path), initMarker)
 	_, merr := os.Stat(marker)
+	if merr != nil && !os.IsNotExist(merr) {
+		// Can't tell whether this node was initialized: never guess "fresh".
+		return fmt.Errorf("stat init marker: %w", merr)
+	}
 	if _, err := os.Stat(s.path); err == nil {
 		if os.IsNotExist(merr) {
 			return writeMarker(marker)

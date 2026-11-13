@@ -209,3 +209,18 @@ func TestOpenCreatesEmptyStateFile(t *testing.T) {
 		t.Fatalf("fresh store snapshot: %v %v", u, err)
 	}
 }
+
+// Review pass 5: an unreadable init marker must not be taken as "fresh node".
+func TestMarkerStatErrorDoesNotRecreateState(t *testing.T) {
+	dir := t.TempDir()
+	// Self-referencing symlink: stat fails with ELOOP, not ENOENT.
+	if err := os.Symlink(".initialized", filepath.Join(dir, ".initialized")); err != nil {
+		t.Skip("symlinks unsupported:", err)
+	}
+	if _, err := Open(dir); err == nil {
+		t.Fatal("Open must fail when the init marker cannot be read")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state.json")); !os.IsNotExist(err) {
+		t.Fatal("state.json was created despite an unreadable marker")
+	}
+}
