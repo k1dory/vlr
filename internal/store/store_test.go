@@ -1,6 +1,11 @@
 package store
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 // TestAddUserGeneratesSubToken checks every created user gets an unguessable
 // subscription token, that FindBySubToken resolves it, and that empty never matches.
@@ -84,5 +89,67 @@ func TestBackfillSubTokenOnOpen(t *testing.T) {
 	}
 	if u.SubToken == "" {
 		t.Fatal("backfill did not assign a sub token")
+	}
+}
+
+// Regression: the daemon (one Store) and the CLI (another Store on the same
+// file) used to clobber each other — the daemon's traffic flush rewrote the file
+// from its stale in-memory list and dropped users the CLI had just added.
+func TestTwoStoresOnOneFileDoNotLoseWrites(t *testing.T) {
+	dir := t.TempDir()
+	daemon, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := daemon.AddUser(User{UUID: "u1", Email: "a@x"}); err != nil {
+		t.Fatal(err)
+	}
+	cli, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.AddUser(User{UUID: "u2", Email: "b@x"}); err != nil {
+		t.Fatal(err)
+	}
+	// Daemon flushes traffic with its old view: must not drop u2.
+	unknown, err := daemon.UpdateTrafficBatch(map[string]Traffic{"a@x": {Rx: 5, Tx: 6}, "ghost@x": {Rx: 1}})
+	if err != nil || unknown != 1 {
+		t.Fatalf("batch: unknown=%d err=%v", unknown, err)
+	}
+	fresh, _ := Open(dir)
+	got := fresh.Users()
+	if len(got) != 2 {
+		t.Fatalf("lost a user: %+v", got)
+	}
+	if u, _ := fresh.FindUser("a@x"); u.RxBytes != 5 || u.TxBytes != 6 {
+		t.Fatalf("traffic not saved: %+v", u)
+	}
+	// Daemon reads see the CLI's change without reopening.
+	if _, ok := daemon.FindUser("b@x"); !ok {
+		t.Fatal("daemon did not pick up CLI-added user")
+	}
+	// CLI removal is visible to the daemon too.
+	if err := cli.RemoveUser("a@x"); err != nil {
+		t.Fatal(err)
+	}
+	if len(daemon.Users()) != 1 {
+		t.Fatalf("daemon still sees removed user: %+v", daemon.Users())
+	}
+	if daemon.ConfigVersion() != 3 {
+		t.Fatalf("config version = %d, want 3 (add, add, remove)", daemon.ConfigVersion())
+	}
+}
+
+func TestUpdateTrafficBatchWritesOnlyOnChange(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	_ = s.AddUser(User{UUID: "u1", Email: "a@x"})
+	_, _ = s.UpdateTrafficBatch(map[string]Traffic{"a@x": {Rx: 1, Tx: 1}})
+	fi1, _ := os.Stat(filepath.Join(dir, "state.json"))
+	time.Sleep(20 * time.Millisecond)
+	_, _ = s.UpdateTrafficBatch(map[string]Traffic{"a@x": {Rx: 1, Tx: 1}})
+	fi2, _ := os.Stat(filepath.Join(dir, "state.json"))
+	if !fi1.ModTime().Equal(fi2.ModTime()) {
+		t.Fatal("unchanged counters rewrote the state file")
 	}
 }

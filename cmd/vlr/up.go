@@ -57,7 +57,7 @@ func cmdUp(args []string) error {
 	if c.Xray.ConfigPath == "" {
 		c.Xray.ConfigPath = "/usr/local/etc/xray/config.json"
 	}
-	if err := xray.Apply(c, st.Users()); err != nil {
+	if err := xray.ApplyForce(c, st.Users()); err != nil {
 		return fmt.Errorf("apply xray: %w", err)
 	}
 	_ = exec.Command("systemctl", "enable", "xray").Run()
