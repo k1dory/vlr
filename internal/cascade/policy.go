@@ -217,8 +217,10 @@ func EnsureRules(ctx context.Context, iface, unit string, mark int) ([]string, e
 
 // GuardRules re-checks the cascade policy routing every interval and restores
 // it if something (networkd, an operator, a script) removed it. A gap must
-// persist for confirmDelay before it is repaired. It runs until ctx is done.
-func GuardRules(ctx context.Context, log *slog.Logger, iface, unit string, mark int, every time.Duration) {
+// persist for confirmDelay before it is repaired. With repair=false (the
+// tunnel's hooks are not idempotent, so a repair could race PostUp and abort a
+// tunnel start) it only logs the gap. It runs until ctx is done.
+func GuardRules(ctx context.Context, log *slog.Logger, iface, unit string, mark int, every time.Duration, repair bool) {
 	if every <= 0 {
 		every = 30 * time.Second
 	}
@@ -233,6 +235,13 @@ func GuardRules(ctx context.Context, log *slog.Logger, iface, unit string, mark 
 			return
 		}
 		if st.OK() {
+			return
+		}
+		if !repair {
+			if ifaceExists(iface) {
+				log.Error("cascade policy routing is missing; Xray egress may bypass the cascade (not repairing: tunnel hooks are not idempotent, re-run `vlr cascade up`)",
+					"iface", iface, "fwmark_rule", st.Fwmark, "oif_rule", st.Oif, "route", st.Route)
+			}
 			return
 		}
 		select {

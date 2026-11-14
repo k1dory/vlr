@@ -3,10 +3,12 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/k1dory/vlr/internal/cascade"
 	"github.com/k1dory/vlr/internal/config"
+	"github.com/k1dory/vlr/internal/wireguard"
 )
 
 // cascadeGuardEvery is how often the cascade policy routing is re-checked.
@@ -25,6 +27,19 @@ func startCascadeGuard(ctx context.Context, cfg *config.Config, log *slog.Logger
 	} else if created {
 		log.Info("networkd drop-in installed", "path", cascade.NetworkdDropIn)
 	}
+	// Repairs are only safe when the tunnel's PostUp tolerates rules/route that
+	// already exist; migrate hooks written by older vlr versions first.
+	confPath := filepath.Join(cfg.Cascade.ConfigDir(), cfg.Cascade.Interface+".conf")
+	changed, idempotent, err := wireguard.MigrateEntryHooks(confPath, config.CascadeFwmark)
+	switch {
+	case err != nil:
+		log.Warn("could not check tunnel hooks; cascade guard will only report", "path", confPath, "err", err)
+	case changed:
+		log.Info("tunnel hooks migrated to idempotent form (applies on next tunnel start)", "path", confPath)
+	case !idempotent:
+		log.Warn("tunnel config has custom hooks; cascade guard will only report", "path", confPath)
+	}
+	repair := err == nil && idempotent
 	unit := cfg.Cascade.Tool() + "-quick@" + cfg.Cascade.Interface
-	go cascade.GuardRules(ctx, log, cfg.Cascade.Interface, unit, config.CascadeFwmark, cascadeGuardEvery)
+	go cascade.GuardRules(ctx, log, cfg.Cascade.Interface, unit, config.CascadeFwmark, cascadeGuardEvery, repair)
 }

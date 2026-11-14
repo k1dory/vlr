@@ -402,7 +402,9 @@ func cmdCascadeCheck(args []string) error {
 	fmt.Print(cascade.FormatEgress(st, stErr, eg))
 	// Missing rules or a proven bypass fail the check; an unreachable IP
 	// service only leaves the egress unverified (shown as [?]).
-	routingBad := (stErr == nil && !st.OK()) || eg.Bypassed()
+	// The oif rule only serves interface-bound probes; without it Xray's marked
+	// traffic still uses the tunnel, so it is a warning, not a bypass.
+	routingBad := (stErr == nil && (!st.Fwmark || !st.Route)) || eg.Bypassed()
 
 	results := cascade.HealthcheckProgress(ctx, c.Cascade.Interface, sites, *timeout, func(r cascade.SiteResult) {
 		fmt.Print(cascade.FormatResults([]cascade.SiteResult{r}))
@@ -413,6 +415,10 @@ func cmdCascadeCheck(args []string) error {
 	}
 	if stErr != nil {
 		return fmt.Errorf("не удалось прочитать маршрутизацию каскада: %w", stErr)
+	}
+	if !st.Oif {
+		fmt.Printf("⚠ нет правила oif %s → таблица %d: трафик Xray идёт через каскад, но проверки сайтов выше могли врать; демон vlr восстановит правило\n",
+			c.Cascade.Interface, config.CascadeFwmark)
 	}
 	for _, r := range results {
 		if !r.OK {

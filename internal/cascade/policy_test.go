@@ -3,10 +3,13 @@ package cascade
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const rulesOK = `0:	from all lookup local
@@ -189,5 +192,50 @@ func TestFormatEgress(t *testing.T) {
 	}
 	if out := FormatEgress(RuleState{true, true, true}, nil, r); strings.Contains(out, "[OK] (") || !strings.Contains(out, "[?]") {
 		t.Fatalf("inconclusive shown wrong:\n%s", out)
+	}
+}
+
+func TestGuardReportOnlyNeverWrites(t *testing.T) {
+	f := &fakeIP{rules: rulesFlushed, routes: "default dev wg-cascade\n"}
+	withFake(t, f, true)
+	old := confirmDelay
+	confirmDelay = 0
+	t.Cleanup(func() { confirmDelay = old })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		GuardRules(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), "wg-cascade", "", 51820, time.Hour, false)
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+	for _, c := range f.calls {
+		if strings.Contains(c, " add ") || strings.Contains(c, "replace") {
+			t.Fatalf("report-only guard wrote: %v", f.calls)
+		}
+	}
+	if len(f.calls) == 0 {
+		t.Fatal("guard did not check at all")
+	}
+}
+
+func TestGuardRepairs(t *testing.T) {
+	f := &fakeIP{rules: rulesFlushed, routes: "default dev wg-cascade\n"}
+	withFake(t, f, true)
+	old := confirmDelay
+	confirmDelay = 0
+	t.Cleanup(func() { confirmDelay = old })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		GuardRules(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), "wg-cascade", "", 51820, time.Hour, true)
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+	if st := ParseRules(f.rules, "wg-cascade", 51820); !st.Fwmark || !st.Oif {
+		t.Fatalf("not repaired: %s", f.rules)
 	}
 }
