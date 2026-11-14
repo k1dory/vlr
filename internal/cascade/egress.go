@@ -17,29 +17,32 @@ var EgressCheckURL = "https://api.ipify.org"
 // node's own unmarked traffic leaves from. If they match, the cascade is up but
 // bypassed — the failure a handshake or `curl --interface` probe cannot see.
 type EgressResult struct {
-	Marked   string // public IP seen for traffic carrying the cascade fwmark
-	Direct   string // public IP seen for the node's own traffic
-	Err      error
-	Bypassed bool
+	Marked    string // public IP seen for traffic carrying the cascade fwmark
+	Direct    string // public IP seen for the node's own traffic
+	Err       error  // marked lookup failed
+	DirectErr error  // direct lookup failed
 }
 
-// OK reports whether marked traffic provably leaves through the exit.
-func (r EgressResult) OK() bool { return r.Err == nil && r.Marked != "" && !r.Bypassed }
+// Bypassed: both lookups succeeded and returned the same address.
+func (r EgressResult) Bypassed() bool {
+	return r.Marked != "" && r.Direct != "" && r.Marked == r.Direct
+}
+
+// OK: both lookups succeeded and marked traffic leaves from another address.
+func (r EgressResult) OK() bool {
+	return r.Marked != "" && r.Direct != "" && r.Marked != r.Direct
+}
+
+// Inconclusive: a lookup failed, so nothing was proven either way (the IP
+// service may simply be unreachable) — not evidence of a bypass.
+func (r EgressResult) Inconclusive() bool { return !r.OK() && !r.Bypassed() }
 
 // Egress fetches the public IP twice — with the cascade fwmark (as Xray does)
 // and without — and flags the cascade as bypassed when both are the same.
 func Egress(ctx context.Context, mark int, timeout time.Duration) EgressResult {
 	var r EgressResult
 	r.Marked, r.Err = publicIP(ctx, mark, timeout)
-	if r.Err != nil {
-		r.Err = fmt.Errorf("marked request: %w", r.Err)
-		return r
-	}
-	direct, err := publicIP(ctx, 0, timeout)
-	if err == nil {
-		r.Direct = direct
-		r.Bypassed = direct == r.Marked
-	}
+	r.Direct, r.DirectErr = publicIP(ctx, 0, timeout)
 	return r
 }
 
@@ -101,14 +104,20 @@ func FormatEgress(st RuleState, stErr error, eg EgressResult) string {
 		fmt.Fprintf(&b, "маршрут в таблице туннеля %s\n", mark(st.Route))
 	}
 	switch {
-	case eg.Err != nil:
-		fmt.Fprintf(&b, "выход трафика Xray [FAIL]\n  logs: %v\n", eg.Err)
-	case eg.Bypassed:
+	case eg.Bypassed():
 		fmt.Fprintf(&b, "выход трафика Xray %s [FAIL] — совпадает с адресом узла, каскад обходится\n", eg.Marked)
-	case eg.Direct == "":
-		fmt.Fprintf(&b, "выход трафика Xray %s [OK] (адрес узла узнать не удалось)\n", eg.Marked)
-	default:
+	case eg.OK():
 		fmt.Fprintf(&b, "выход трафика Xray %s [OK] (узел напрямую: %s)\n", eg.Marked, eg.Direct)
+	default:
+		fmt.Fprintf(&b, "выход трафика Xray [?] — не удалось проверить (%s недоступен?)\n", EgressCheckURL)
+		if eg.Err != nil {
+			fmt.Fprintf(&b, "  marked: %v\n", eg.Err)
+		} else {
+			fmt.Fprintf(&b, "  marked: %s\n", eg.Marked)
+		}
+		if eg.DirectErr != nil {
+			fmt.Fprintf(&b, "  direct: %v\n", eg.DirectErr)
+		}
 	}
 	return b.String()
 }

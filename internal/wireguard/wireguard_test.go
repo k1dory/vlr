@@ -17,7 +17,7 @@ func TestEntryAWGAndLegacy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{a.Render(), "Table = off", "ip rule add fwmark 51820 table 51820", "ip rule add oif %i table 51820", "ip rule del oif %i table 51820"} {
+	for _, want := range []string{a.Render(), "Table = off", "ip rule add fwmark 51820 table 51820", "ip rule add oif %i table 51820", "while ip rule del oif %i table 51820 2>/dev/null; do :; done", "ip route replace default dev %i table 51820"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("missing %q", want)
 		}

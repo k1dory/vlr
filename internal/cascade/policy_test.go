@@ -35,6 +35,9 @@ func TestParseRules(t *testing.T) {
 		{"other table", "100: from all fwmark 0xca6c lookup 100\n101: from all oif wg-cascade lookup main\n", RuleState{}},
 		{"other iface", "100: from all oif wg0 lookup 51820\n", RuleState{}},
 		{"legacy not fwmark is not ours", "100: not from all fwmark 0xca6c lookup 51820\n", RuleState{}},
+		{"combined selectors count as neither", "100: from all fwmark 0xca6c oif wg-cascade lookup 51820\n", RuleState{}},
+		{"source-restricted is not general", "100: from 10.0.0.0/8 fwmark 0xca6c lookup 51820\n", RuleState{}},
+		{"suppressor is not general", "100: from all fwmark 0xca6c lookup 51820 suppress_prefixlength 0\n", RuleState{}},
 	}
 	for _, c := range cases {
 		if got := ParseRules(c.out, "wg-cascade", 51820); got != c.want {
@@ -62,9 +65,9 @@ func (f *fakeIP) run(_ context.Context, args ...string) ([]byte, error) {
 	cmd := strings.Join(args, " ")
 	f.calls = append(f.calls, cmd)
 	switch {
-	case cmd == "-4 rule show":
+	case cmd == "-N -4 rule show":
 		return []byte(f.rules), nil
-	case cmd == "-4 route show table 51820":
+	case cmd == "-N -4 route show table 51820":
 		return []byte(f.routes), nil
 	case f.failAdd:
 		return nil, errors.New("boom")
@@ -80,16 +83,33 @@ func (f *fakeIP) run(_ context.Context, args ...string) ([]byte, error) {
 
 func withFake(t *testing.T, f *fakeIP, exists bool) {
 	t.Helper()
-	oldRun, oldExists := runIP, ifaceExists
+	oldRun, oldExists, oldActive := runIP, ifaceExists, unitActive
 	runIP = f.run
 	ifaceExists = func(string) bool { return exists }
-	t.Cleanup(func() { runIP, ifaceExists = oldRun, oldExists })
+	unitActive = func(context.Context, string) bool { return true }
+	t.Cleanup(func() { runIP, ifaceExists, unitActive = oldRun, oldExists, oldActive })
+}
+
+func TestEnsureRulesSkipsWhileUnitNotActive(t *testing.T) {
+	f := &fakeIP{rules: rulesFlushed}
+	withFake(t, f, true)
+	var asked string
+	unitActive = func(_ context.Context, unit string) bool { asked = unit; return false }
+	added, err := EnsureRules(context.Background(), "wg-cascade", "awg-quick@wg-cascade", 51820)
+	if err != nil || len(added) != 0 || asked != "awg-quick@wg-cascade" {
+		t.Fatalf("touched routing while awg-quick starting/stopping: added %v err %v unit %q", added, err, asked)
+	}
+	for _, c := range f.calls {
+		if strings.Contains(c, " add ") || strings.Contains(c, "replace") {
+			t.Fatalf("write issued: %v", f.calls)
+		}
+	}
 }
 
 func TestEnsureRulesRestoresFlushed(t *testing.T) {
 	f := &fakeIP{rules: rulesFlushed, routes: "default dev wg-cascade scope link\n"}
 	withFake(t, f, true)
-	added, err := EnsureRules(context.Background(), "wg-cascade", 51820)
+	added, err := EnsureRules(context.Background(), "wg-cascade", "", 51820)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +121,7 @@ func TestEnsureRulesRestoresFlushed(t *testing.T) {
 		t.Fatalf("not restored: %+v", st)
 	}
 	// Second pass is a no-op: no duplicate rules.
-	added, err = EnsureRules(context.Background(), "wg-cascade", 51820)
+	added, err = EnsureRules(context.Background(), "wg-cascade", "", 51820)
 	if err != nil || len(added) != 0 {
 		t.Fatalf("second pass added %v err %v", added, err)
 	}
@@ -110,7 +130,7 @@ func TestEnsureRulesRestoresFlushed(t *testing.T) {
 func TestEnsureRulesRestoresRoute(t *testing.T) {
 	f := &fakeIP{rules: rulesOK}
 	withFake(t, f, true)
-	added, err := EnsureRules(context.Background(), "wg-cascade", 51820)
+	added, err := EnsureRules(context.Background(), "wg-cascade", "", 51820)
 	if err != nil || len(added) != 1 || !strings.HasPrefix(added[0], "route") {
 		t.Fatalf("added %v err %v", added, err)
 	}
@@ -119,7 +139,7 @@ func TestEnsureRulesRestoresRoute(t *testing.T) {
 func TestEnsureRulesSkipsWhenTunnelDown(t *testing.T) {
 	f := &fakeIP{rules: rulesFlushed}
 	withFake(t, f, false)
-	added, err := EnsureRules(context.Background(), "wg-cascade", 51820)
+	added, err := EnsureRules(context.Background(), "wg-cascade", "", 51820)
 	if err != nil || len(added) != 0 || len(f.calls) != 0 {
 		t.Fatalf("touched routing with tunnel down: added %v calls %v err %v", added, f.calls, err)
 	}
@@ -128,7 +148,7 @@ func TestEnsureRulesSkipsWhenTunnelDown(t *testing.T) {
 func TestEnsureRulesReportsAddFailure(t *testing.T) {
 	f := &fakeIP{rules: rulesFlushed, routes: "default dev wg-cascade\n", failAdd: true}
 	withFake(t, f, true)
-	if _, err := EnsureRules(context.Background(), "wg-cascade", 51820); err == nil {
+	if _, err := EnsureRules(context.Background(), "wg-cascade", "", 51820); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -150,7 +170,7 @@ func TestWriteIfChanged(t *testing.T) {
 }
 
 func TestFormatEgress(t *testing.T) {
-	out := FormatEgress(RuleState{}, nil, EgressResult{Marked: "158.160.236.81", Direct: "158.160.236.81", Bypassed: true})
+	out := FormatEgress(RuleState{}, nil, EgressResult{Marked: "158.160.236.81", Direct: "158.160.236.81"})
 	if !strings.Contains(out, "каскад обходится") || strings.Count(out, "[FAIL]") != 4 {
 		t.Fatalf("bypass not reported:\n%s", out)
 	}
@@ -159,7 +179,15 @@ func TestFormatEgress(t *testing.T) {
 	if strings.Contains(out, "[FAIL]") || !ok.OK() {
 		t.Fatalf("healthy reported as failing:\n%s", out)
 	}
-	if (EgressResult{Err: errors.New("x")}).OK() {
-		t.Fatal("error result must not be OK")
+	if r := (EgressResult{Err: errors.New("x")}); r.OK() || r.Bypassed() {
+		t.Fatal("marked lookup error must be inconclusive")
+	}
+	// Direct lookup failing must not turn into a false OK (review finding).
+	r := EgressResult{Marked: "158.160.236.81", DirectErr: errors.New("timeout")}
+	if r.OK() || r.Bypassed() || !r.Inconclusive() {
+		t.Fatalf("direct error: OK=%v Bypassed=%v", r.OK(), r.Bypassed())
+	}
+	if out := FormatEgress(RuleState{true, true, true}, nil, r); strings.Contains(out, "[OK] (") || !strings.Contains(out, "[?]") {
+		t.Fatalf("inconclusive shown wrong:\n%s", out)
 	}
 }

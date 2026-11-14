@@ -25,5 +25,6 @@ func startCascadeGuard(ctx context.Context, cfg *config.Config, log *slog.Logger
 	} else if created {
 		log.Info("networkd drop-in installed", "path", cascade.NetworkdDropIn)
 	}
-	go cascade.GuardRules(ctx, log, cfg.Cascade.Interface, config.CascadeFwmark, cascadeGuardEvery)
+	unit := cfg.Cascade.Tool() + "-quick@" + cfg.Cascade.Interface
+	go cascade.GuardRules(ctx, log, cfg.Cascade.Interface, unit, config.CascadeFwmark, cascadeGuardEvery)
 }

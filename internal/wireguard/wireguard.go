@@ -107,11 +107,15 @@ func RenderEntry(c *config.Config) (string, error) {
 	// session you are on (the old "not fwmark" rule did, and froze it).
 	fw := config.CascadeFwmark
 	fmt.Fprintf(&b, "Table = off\n")
-	fmt.Fprintf(&b, "PostUp = ip route add default dev %%i table %d; ip rule add fwmark %d table %d\n", fw, fw, fw)
+	// Hooks are idempotent: the vlr daemon restores these rules if something
+	// flushes them, so PostUp may find the route/rules already present. awg-quick
+	// runs hooks under `set -e` and tears the interface down on any failure, so
+	// `route add` ("File exists") or duplicate rules must not be possible here.
+	fmt.Fprintf(&b, "PostUp = ip route replace default dev %%i table %d; while ip rule del fwmark %d table %d 2>/dev/null; do :; done; ip rule add fwmark %d table %d\n", fw, fw, fw, fw, fw)
 	// curl --interface probes are unmarked but explicitly bound to this device.
-	fmt.Fprintf(&b, "PostUp = ip rule add oif %%i table %d\n", fw)
-	fmt.Fprintf(&b, "PostDown = ip rule del fwmark %d table %d 2>/dev/null || true\n", fw, fw)
-	fmt.Fprintf(&b, "PostDown = ip rule del oif %%i table %d 2>/dev/null || true\n\n", fw)
+	fmt.Fprintf(&b, "PostUp = while ip rule del oif %%i table %d 2>/dev/null; do :; done; ip rule add oif %%i table %d\n", fw, fw)
+	fmt.Fprintf(&b, "PostDown = while ip rule del fwmark %d table %d 2>/dev/null; do :; done\n", fw, fw)
+	fmt.Fprintf(&b, "PostDown = while ip rule del oif %%i table %d 2>/dev/null; do :; done\n\n", fw)
 	fmt.Fprintf(&b, "[Peer]\n")
 	fmt.Fprintf(&b, "# EU exit (Aeza)\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", w.ExitPublicKey)

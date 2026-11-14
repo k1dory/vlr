@@ -400,14 +400,19 @@ func cmdCascadeCheck(args []string) error {
 	st, stErr := cascade.ReadRules(ctx, c.Cascade.Interface, config.CascadeFwmark)
 	eg := cascade.Egress(ctx, config.CascadeFwmark, *timeout)
 	fmt.Print(cascade.FormatEgress(st, stErr, eg))
-	routingOK := stErr == nil && st.OK() && eg.OK()
+	// Missing rules or a proven bypass fail the check; an unreachable IP
+	// service only leaves the egress unverified (shown as [?]).
+	routingBad := (stErr == nil && !st.OK()) || eg.Bypassed()
 
 	results := cascade.HealthcheckProgress(ctx, c.Cascade.Interface, sites, *timeout, func(r cascade.SiteResult) {
 		fmt.Print(cascade.FormatResults([]cascade.SiteResult{r}))
 	})
-	if !routingOK {
-		return fmt.Errorf("трафик Xray идёт мимо каскада (см. строки [FAIL] выше); правила восстанавливает демон vlr, вручную: systemctl restart %s-quick@%s",
+	if routingBad {
+		return fmt.Errorf("трафик Xray идёт мимо каскада (см. строки [FAIL] выше); демон vlr восстанавливает правила в течение минуты, вручную: systemctl restart %s-quick@%s",
 			c.Cascade.Tool(), c.Cascade.Interface)
+	}
+	if stErr != nil {
+		return fmt.Errorf("не удалось прочитать маршрутизацию каскада: %w", stErr)
 	}
 	for _, r := range results {
 		if !r.OK {

@@ -76,26 +76,31 @@ type RuleState struct {
 // OK reports whether marked traffic will be routed into the tunnel.
 func (s RuleState) OK() bool { return s.Fwmark && s.Oif && s.Route }
 
-// ParseRules inspects `ip -4 rule show` output for the two cascade rules.
+// ParseRules inspects `ip -N -4 rule show` output for the two cascade rules.
+// Only the exact general rules count: a rule with extra selectors (e.g. both
+// fwmark and oif, a source/destination, a suppressor) does not route Xray's
+// marked sockets or the interface-bound probes on its own.
 func ParseRules(out, iface string, mark int) RuleState {
 	var st RuleState
 	table := strconv.Itoa(mark)
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)
-		if len(f) == 0 || ruleArg(f, "lookup") != table && ruleArg(f, "table") != table {
+		if len(f) > 0 && strings.HasSuffix(f[0], ":") {
+			f = f[1:] // priority
+		}
+		if len(f) != 6 || f[0] != "from" || f[1] != "all" || f[4] != "lookup" && f[4] != "table" || f[5] != table {
 			continue
 		}
-		if contains(f, "not") {
-			continue
-		}
-		if v := ruleArg(f, "fwmark"); v != "" {
-			v, _, _ = strings.Cut(v, "/")
+		switch f[2] {
+		case "fwmark":
+			v, _, _ := strings.Cut(f[3], "/")
 			if n, err := strconv.ParseUint(v, 0, 32); err == nil && n == uint64(mark) {
 				st.Fwmark = true
 			}
-		}
-		if ruleArg(f, "oif") == iface {
-			st.Oif = true
+		case "oif":
+			if f[3] == iface {
+				st.Oif = true
+			}
 		}
 	}
 	return st
@@ -122,15 +127,6 @@ func ruleArg(f []string, key string) string {
 	return ""
 }
 
-func contains(f []string, s string) bool {
-	for _, x := range f {
-		if x == s {
-			return true
-		}
-	}
-	return false
-}
-
 // Hooks for tests.
 var (
 	runIP = func(ctx context.Context, args ...string) ([]byte, error) {
@@ -147,16 +143,27 @@ var (
 		_, err := os.Stat(filepath.Join("/sys/class/net", name))
 		return err == nil
 	}
+	// unitActive reports whether the tunnel's systemd unit has finished
+	// starting (PostUp done) and is not stopping. While awg-quick is mid-up or
+	// mid-down the guard must not touch routing: racing PostUp/PostDown is how
+	// duplicate rules or a failed tunnel start happen.
+	unitActive = func(ctx context.Context, unit string) bool {
+		out, err := exec.CommandContext(ctx, "systemctl", "show", unit, "-p", "ActiveState", "--value").Output()
+		return err == nil && strings.TrimSpace(string(out)) == "active"
+	}
+	// confirmDelay: a missing rule must still be missing this much later
+	// before the guard repairs it (covers a manual `awg-quick up` outside systemd).
+	confirmDelay = 5 * time.Second
 )
 
 // ReadRules returns the current policy-routing state for the cascade.
 func ReadRules(ctx context.Context, iface string, mark int) (RuleState, error) {
-	rules, err := runIP(ctx, "-4", "rule", "show")
+	rules, err := runIP(ctx, "-N", "-4", "rule", "show")
 	if err != nil {
 		return RuleState{}, err
 	}
 	st := ParseRules(string(rules), iface, mark)
-	routes, err := runIP(ctx, "-4", "route", "show", "table", strconv.Itoa(mark))
+	routes, err := runIP(ctx, "-N", "-4", "route", "show", "table", strconv.Itoa(mark))
 	if err != nil {
 		return st, err
 	}
@@ -165,10 +172,14 @@ func ReadRules(ctx context.Context, iface string, mark int) (RuleState, error) {
 }
 
 // EnsureRules restores whatever part of the cascade policy routing is missing
-// and returns what it added. With the tunnel interface absent it does nothing:
-// awg-quick will install everything when the tunnel comes up.
-func EnsureRules(ctx context.Context, iface string, mark int) ([]string, error) {
-	if iface == "" || !ifaceExists(iface) {
+// and returns what it added. It does nothing unless the tunnel interface exists
+// and its unit (if given) is fully active: while the tunnel is down, starting
+// or stopping, awg-quick owns the rules.
+func EnsureRules(ctx context.Context, iface, unit string, mark int) ([]string, error) {
+	ready := func() bool {
+		return iface != "" && ifaceExists(iface) && (unit == "" || unitActive(ctx, unit))
+	}
+	if !ready() {
 		return nil, nil
 	}
 	st, err := ReadRules(ctx, iface, mark)
@@ -177,6 +188,12 @@ func EnsureRules(ctx context.Context, iface string, mark int) ([]string, error) 
 	}
 	m := strconv.Itoa(mark)
 	var added []string
+	if st.OK() {
+		return nil, nil
+	}
+	if !ready() { // re-check right before writing
+		return nil, nil
+	}
 	if !st.Route {
 		if _, err := runIP(ctx, "-4", "route", "replace", "default", "dev", iface, "table", m); err != nil {
 			return added, err
@@ -199,21 +216,38 @@ func EnsureRules(ctx context.Context, iface string, mark int) ([]string, error) 
 }
 
 // GuardRules re-checks the cascade policy routing every interval and restores
-// it if something (networkd, an operator, a script) removed it. It runs until
-// ctx is cancelled.
-func GuardRules(ctx context.Context, log *slog.Logger, iface string, mark int, every time.Duration) {
+// it if something (networkd, an operator, a script) removed it. A gap must
+// persist for confirmDelay before it is repaired. It runs until ctx is done.
+func GuardRules(ctx context.Context, log *slog.Logger, iface, unit string, mark int, every time.Duration) {
 	if every <= 0 {
 		every = 30 * time.Second
 	}
 	check := func() {
 		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		st, err := ReadRules(cctx, iface, mark)
+		cancel()
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Error("cascade policy routing check failed", "iface", iface, "err", err)
+			}
+			return
+		}
+		if st.OK() {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(confirmDelay):
+		}
+		cctx, cancel = context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		added, err := EnsureRules(cctx, iface, mark)
+		added, err := EnsureRules(cctx, iface, unit, mark)
 		if len(added) > 0 {
 			log.Warn("cascade policy routing was missing; restored", "iface", iface, "added", added)
 		}
 		if err != nil && ctx.Err() == nil {
-			log.Error("cascade policy routing check failed", "iface", iface, "err", err)
+			log.Error("cascade policy routing repair failed", "iface", iface, "err", err)
 		}
 	}
 	check()
