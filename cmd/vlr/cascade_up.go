@@ -14,6 +14,7 @@ import (
 
 	"github.com/k1dory/vlr/internal/cascade"
 	"github.com/k1dory/vlr/internal/config"
+	"github.com/k1dory/vlr/internal/flock"
 	"github.com/k1dory/vlr/internal/ledger"
 	"github.com/k1dory/vlr/internal/wireguard"
 )
@@ -188,7 +189,14 @@ func cmdCascadeUp(args []string) error {
 		}
 		_ = exec.CommandContext(ctx, oldCascade.Tool()+"-quick", "down", *iface).Run()
 	}
-	if err := os.WriteFile(wgPath, []byte(ruConf), 0o600); err != nil {
+	// Serialize with the daemon's hook migration so neither write is lost.
+	unlockConf, err := flock.Lock(wireguard.EntryConfLockPath(wgPath))
+	if err != nil {
+		return fmt.Errorf("lock %s: %w", wgPath, err)
+	}
+	err = os.WriteFile(wgPath, []byte(ruConf), 0o600)
+	unlockConf()
+	if err != nil {
 		return fmt.Errorf("write %s: %w", wgPath, err)
 	}
 	fmt.Printf("==> поднимаю туннель RU (%s)\n", *iface)
@@ -212,6 +220,15 @@ func cmdCascadeUp(args []string) error {
 		return err
 	}
 	fmt.Printf("✓ автозапуск туннеля: %t (RU и EU)\n", *autostart)
+	// systemd-networkd flushes "foreign" ip rules on every start (e.g. after an
+	// unattended libc upgrade), silently sending Xray egress out the RU address.
+	networkdDropIn := false
+	if created, err := cascade.EnsureNetworkdKeepsRules(cascade.NetworkdDropIn); err != nil {
+		fmt.Printf("⚠ не удалось записать %s: %v — правила каскада может сбросить перезапуск networkd\n", cascade.NetworkdDropIn, err)
+	} else if created {
+		networkdDropIn = true
+		fmt.Printf("✓ networkd больше не сбрасывает правила каскада (%s)\n", cascade.NetworkdDropIn)
+	}
 
 	// Record what we just created so `vlr uninstall` can reverse it. The EU exit
 	// stores host/user/port/key for remote teardown — never the password.
@@ -223,6 +240,9 @@ func cmdCascadeUp(args []string) error {
 		_ = ledger.Record(lp, ledger.KindPackage, "amneziawg", nil)
 	}
 	_ = ledger.Record(lp, ledger.KindFile, wgPath, nil)
+	if networkdDropIn {
+		_ = ledger.Record(lp, ledger.KindFile, cascade.NetworkdDropIn, nil)
+	}
 	_ = ledger.Record(lp, ledger.KindWGIface, *iface, map[string]string{"transport": "awg"})
 	_ = ledger.Record(lp, ledger.KindEUExit, *euHost, map[string]string{
 		"user": *euUser, "port": fmt.Sprintf("%d", *euPort),
@@ -381,9 +401,33 @@ func cmdCascadeCheck(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	// The site probes below bind curl to the tunnel, so they pass even when the
+	// fwmark rules are gone and Xray egress bypasses the cascade. Check the path
+	// Xray actually takes first: the policy rules and the marked egress IP.
+	st, stErr := cascade.ReadRules(ctx, c.Cascade.Interface, config.CascadeFwmark)
+	eg := cascade.Egress(ctx, config.CascadeFwmark, *timeout)
+	fmt.Print(cascade.FormatEgress(st, stErr, eg))
+	// Missing rules or a proven bypass fail the check; an unreachable IP
+	// service only leaves the egress unverified (shown as [?]).
+	// The oif rule only serves interface-bound probes; without it Xray's marked
+	// traffic still uses the tunnel, so it is a warning, not a bypass.
+	routingBad := (stErr == nil && (!st.Fwmark || !st.Route)) || eg.Bypassed()
+
 	results := cascade.HealthcheckProgress(ctx, c.Cascade.Interface, sites, *timeout, func(r cascade.SiteResult) {
 		fmt.Print(cascade.FormatResults([]cascade.SiteResult{r}))
 	})
+	if routingBad {
+		return fmt.Errorf("трафик Xray идёт мимо каскада (см. строки [FAIL] выше); демон vlr восстанавливает правила в течение минуты, вручную: systemctl restart %s-quick@%s",
+			c.Cascade.Tool(), c.Cascade.Interface)
+	}
+	if stErr != nil {
+		return fmt.Errorf("не удалось прочитать маршрутизацию каскада: %w", stErr)
+	}
+	if !st.Oif {
+		fmt.Printf("⚠ нет правила oif %s → таблица %d: трафик Xray идёт через каскад, но проверки сайтов выше могли врать; демон vlr восстановит правило\n",
+			c.Cascade.Interface, config.CascadeFwmark)
+	}
 	for _, r := range results {
 		if !r.OK {
 			return fmt.Errorf("some sites unreachable through the cascade")

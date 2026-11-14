@@ -1,0 +1,127 @@
+package cascade
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// EgressCheckURL returns the caller's public IPv4 as plain text.
+var EgressCheckURL = "https://api.ipify.org"
+
+// EgressResult compares where Xray's (marked) traffic leaves from with where the
+// node's own unmarked traffic leaves from. If they match, the cascade is up but
+// bypassed — the failure a handshake or `curl --interface` probe cannot see.
+type EgressResult struct {
+	Marked    string // public IP seen for traffic carrying the cascade fwmark
+	Direct    string // public IP seen for the node's own traffic
+	Err       error  // marked lookup failed
+	DirectErr error  // direct lookup failed
+}
+
+// Bypassed: both lookups succeeded and returned the same address.
+func (r EgressResult) Bypassed() bool {
+	return r.Marked != "" && r.Direct != "" && r.Marked == r.Direct
+}
+
+// OK: both lookups succeeded and marked traffic leaves from another address.
+func (r EgressResult) OK() bool {
+	return r.Marked != "" && r.Direct != "" && r.Marked != r.Direct
+}
+
+// Inconclusive: a lookup failed, so nothing was proven either way (the IP
+// service may simply be unreachable) — not evidence of a bypass.
+func (r EgressResult) Inconclusive() bool { return !r.OK() && !r.Bypassed() }
+
+// Egress fetches the public IP twice — with the cascade fwmark (as Xray does)
+// and without — and flags the cascade as bypassed when both are the same.
+func Egress(ctx context.Context, mark int, timeout time.Duration) EgressResult {
+	var r EgressResult
+	r.Marked, r.Err = publicIP(ctx, mark, timeout)
+	r.Direct, r.DirectErr = publicIP(ctx, 0, timeout)
+	return r
+}
+
+func publicIP(ctx context.Context, mark int, timeout time.Duration) (string, error) {
+	d := &net.Dialer{Timeout: timeout}
+	if mark != 0 {
+		ctl, err := markControl(mark)
+		if err != nil {
+			return "", err
+		}
+		d.Control = ctl
+	}
+	tr := &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+			return d.DialContext(ctx, "tcp4", addr)
+		},
+		DisableKeepAlives: true,
+	}
+	defer tr.CloseIdleConnections()
+	c := &http.Client{Transport: tr, Timeout: timeout}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, EgressCheckURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s: HTTP %d", EgressCheckURL, resp.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	if err != nil {
+		return "", err
+	}
+	ip := strings.TrimSpace(string(b))
+	if net.ParseIP(ip) == nil {
+		return "", fmt.Errorf("%s: unexpected answer %q", EgressCheckURL, ip)
+	}
+	return ip, nil
+}
+
+// FormatEgress renders the policy/egress lines shown by `vlr cascade check`.
+func FormatEgress(st RuleState, stErr error, eg EgressResult) string {
+	var b strings.Builder
+	mark := func(ok bool) string {
+		if ok {
+			return "[OK]"
+		}
+		return "[FAIL]"
+	}
+	if stErr != nil {
+		fmt.Fprintf(&b, "маршрутизация каскада [FAIL]\n  logs: %v\n", stErr)
+	} else {
+		fmt.Fprintf(&b, "правило fwmark → туннель %s\n", mark(st.Fwmark))
+		oif := "[OK]"
+		if !st.Oif {
+			oif = "[WARN] — трафик Xray не затронут, врут только проверки сайтов"
+		}
+		fmt.Fprintf(&b, "правило oif → туннель    %s\n", oif)
+		fmt.Fprintf(&b, "маршрут в таблице туннеля %s\n", mark(st.Route))
+	}
+	switch {
+	case eg.Bypassed():
+		fmt.Fprintf(&b, "выход трафика Xray %s [FAIL] — совпадает с адресом узла, каскад обходится\n", eg.Marked)
+	case eg.OK():
+		fmt.Fprintf(&b, "выход трафика Xray %s [OK] (узел напрямую: %s)\n", eg.Marked, eg.Direct)
+	default:
+		fmt.Fprintf(&b, "выход трафика Xray [?] — не удалось проверить (%s недоступен?)\n", EgressCheckURL)
+		if eg.Err != nil {
+			fmt.Fprintf(&b, "  marked: %v\n", eg.Err)
+		} else {
+			fmt.Fprintf(&b, "  marked: %s\n", eg.Marked)
+		}
+		if eg.DirectErr != nil {
+			fmt.Fprintf(&b, "  direct: %v\n", eg.DirectErr)
+		}
+	}
+	return b.String()
+}

@@ -20,9 +20,12 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/k1dory/vlr/internal/config"
+	"github.com/k1dory/vlr/internal/flock"
 )
 
 // KeyPair is a WireGuard key pair, base64 std-encoded as wg expects.
@@ -107,11 +110,10 @@ func RenderEntry(c *config.Config) (string, error) {
 	// session you are on (the old "not fwmark" rule did, and froze it).
 	fw := config.CascadeFwmark
 	fmt.Fprintf(&b, "Table = off\n")
-	fmt.Fprintf(&b, "PostUp = ip route add default dev %%i table %d; ip rule add fwmark %d table %d\n", fw, fw, fw)
-	// curl --interface probes are unmarked but explicitly bound to this device.
-	fmt.Fprintf(&b, "PostUp = ip rule add oif %%i table %d\n", fw)
-	fmt.Fprintf(&b, "PostDown = ip rule del fwmark %d table %d 2>/dev/null || true\n", fw, fw)
-	fmt.Fprintf(&b, "PostDown = ip rule del oif %%i table %d 2>/dev/null || true\n\n", fw)
+	for _, h := range EntryHooks(fw) {
+		b.WriteString(h + "\n")
+	}
+	b.WriteString("\n")
 	fmt.Fprintf(&b, "[Peer]\n")
 	fmt.Fprintf(&b, "# EU exit (Aeza)\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", w.ExitPublicKey)
@@ -156,4 +158,139 @@ func RenderExit(p ExitParams) (string, error) {
 	fmt.Fprintf(&b, "PublicKey = %s\n", p.EntryPublicKey)
 	fmt.Fprintf(&b, "AllowedIPs = %s\n", p.EntryTunnelIP)
 	return b.String(), nil
+}
+
+// EntryHooks are the RU entry's PostUp/PostDown lines. They are idempotent: the
+// vlr daemon restores the rules if something flushes them, so PostUp may find
+// the route/rules already present. awg-quick runs hooks under `set -e` and tears
+// the interface down on any failure, so `route add` ("File exists") or
+// duplicate rules must not be possible here.
+func EntryHooks(fw int) []string {
+	return []string{
+		fmt.Sprintf("PostUp = ip route replace default dev %%i table %d; while ip rule del fwmark %d table %d 2>/dev/null; do :; done; ip rule add fwmark %d table %d", fw, fw, fw, fw, fw),
+		// curl --interface probes are unmarked but explicitly bound to this device.
+		fmt.Sprintf("PostUp = while ip rule del oif %%i table %d 2>/dev/null; do :; done; ip rule add oif %%i table %d", fw, fw),
+		fmt.Sprintf("PostDown = while ip rule del fwmark %d table %d 2>/dev/null; do :; done", fw, fw),
+		fmt.Sprintf("PostDown = while ip rule del oif %%i table %d 2>/dev/null; do :; done", fw),
+	}
+}
+
+// legacyEntryHooks are hook lines older vlr versions generated (non-idempotent).
+func legacyEntryHooks(fw int) []string {
+	return []string{
+		fmt.Sprintf("PostUp = ip route add default dev %%i table %d; ip rule add fwmark %d table %d", fw, fw, fw),
+		fmt.Sprintf("PostUp = ip rule add oif %%i table %d", fw),
+		fmt.Sprintf("PostDown = ip rule del fwmark %d table %d 2>/dev/null || true", fw, fw),
+		fmt.Sprintf("PostDown = ip rule del oif %%i table %d 2>/dev/null || true", fw),
+	}
+}
+
+// isHookLine matches wg-quick hook keys the way awg-quick parses them:
+// case-insensitive key, optional spaces around "=".
+func isHookLine(line string) bool {
+	key, _, ok := strings.Cut(strings.TrimSpace(line), "=")
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "postup", "postdown", "preup", "predown":
+		return true
+	}
+	return false
+}
+
+// EntryConfLockPath is the lock serializing writers of an entry config
+// (`vlr cascade up` and the daemon's hook migration).
+func EntryConfLockPath(confPath string) string { return confPath + ".lock" }
+
+// MigrateEntryHooksData rewrites vlr-generated legacy hooks in an entry config
+// to EntryHooks. idempotent reports whether the result carries exactly the
+// idempotent hooks; configs with hooks vlr did not write are left untouched
+// (idempotent=false).
+func MigrateEntryHooksData(data string, fw int) (out string, changed, idempotent bool) {
+	known := map[string]bool{}
+	for _, h := range append(EntryHooks(fw), legacyEntryHooks(fw)...) {
+		known[h] = true
+	}
+	lines := strings.Split(data, "\n")
+	var hooks []string
+	first := -1
+	for i, l := range lines {
+		if !isHookLine(l) {
+			continue
+		}
+		t := strings.TrimSpace(l)
+		if !known[t] {
+			return data, false, false
+		}
+		if first < 0 {
+			first = i
+		}
+		hooks = append(hooks, t)
+	}
+	want := EntryHooks(fw)
+	if first < 0 {
+		return data, false, false
+	}
+	if strings.Join(hooks, "\n") == strings.Join(want, "\n") {
+		return data, false, true
+	}
+	var res []string
+	for i, l := range lines {
+		if i == first {
+			res = append(res, want...)
+		}
+		if isHookLine(l) {
+			continue
+		}
+		res = append(res, l)
+	}
+	return strings.Join(res, "\n"), true, true
+}
+
+// MigrateEntryHooks applies MigrateEntryHooksData to the config file at path,
+// atomically and keeping its permissions. The running tunnel is not touched:
+// the new hooks take effect on its next start.
+func MigrateEntryHooks(path string, fw int) (changed, idempotent bool, err error) {
+	unlock, err := flock.Lock(EntryConfLockPath(path))
+	if err != nil {
+		return false, false, err
+	}
+	defer unlock()
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false, false, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, false, err
+	}
+	out, changed, idempotent := MigrateEntryHooksData(string(data), fw)
+	if !changed {
+		return false, idempotent, nil
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return false, false, err
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(fi.Mode().Perm()); err != nil {
+		tmp.Close()
+		return false, false, err
+	}
+	if _, err := tmp.WriteString(out); err != nil {
+		tmp.Close()
+		return false, false, err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return false, false, err
+	}
+	if err := tmp.Close(); err != nil {
+		return false, false, err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return false, false, err
+	}
+	return true, true, nil
 }

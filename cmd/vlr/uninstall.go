@@ -219,6 +219,10 @@ func cmdUninstall(args []string) error {
 		sys("ip", "rule", "del", "fwmark", fmt.Sprintf("%d", config.CascadeFwmark), "table", fmt.Sprintf("%d", config.CascadeFwmark))
 		rmf("/etc/wireguard/" + i + ".conf")
 	}
+	if len(ifaces) > 0 {
+		// The daemon may have installed it without a ledger entry (upgraded nodes).
+		rmf(cascade.NetworkdDropIn)
+	}
 
 	// D. systemd unit.
 	step("удаляю systemd-юнит")
