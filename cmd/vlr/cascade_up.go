@@ -14,6 +14,7 @@ import (
 
 	"github.com/k1dory/vlr/internal/cascade"
 	"github.com/k1dory/vlr/internal/config"
+	"github.com/k1dory/vlr/internal/flock"
 	"github.com/k1dory/vlr/internal/ledger"
 	"github.com/k1dory/vlr/internal/wireguard"
 )
@@ -188,7 +189,14 @@ func cmdCascadeUp(args []string) error {
 		}
 		_ = exec.CommandContext(ctx, oldCascade.Tool()+"-quick", "down", *iface).Run()
 	}
-	if err := os.WriteFile(wgPath, []byte(ruConf), 0o600); err != nil {
+	// Serialize with the daemon's hook migration so neither write is lost.
+	unlockConf, err := flock.Lock(wireguard.EntryConfLockPath(wgPath))
+	if err != nil {
+		return fmt.Errorf("lock %s: %w", wgPath, err)
+	}
+	err = os.WriteFile(wgPath, []byte(ruConf), 0o600)
+	unlockConf()
+	if err != nil {
 		return fmt.Errorf("write %s: %w", wgPath, err)
 	}
 	fmt.Printf("==> поднимаю туннель RU (%s)\n", *iface)

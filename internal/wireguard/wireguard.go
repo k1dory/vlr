@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/k1dory/vlr/internal/config"
+	"github.com/k1dory/vlr/internal/flock"
 )
 
 // KeyPair is a WireGuard key pair, base64 std-encoded as wg expects.
@@ -184,11 +185,23 @@ func legacyEntryHooks(fw int) []string {
 	}
 }
 
+// isHookLine matches wg-quick hook keys the way awg-quick parses them:
+// case-insensitive key, optional spaces around "=".
 func isHookLine(line string) bool {
-	t := strings.TrimSpace(line)
-	return strings.HasPrefix(t, "PostUp") || strings.HasPrefix(t, "PostDown") ||
-		strings.HasPrefix(t, "PreUp") || strings.HasPrefix(t, "PreDown")
+	key, _, ok := strings.Cut(strings.TrimSpace(line), "=")
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "postup", "postdown", "preup", "predown":
+		return true
+	}
+	return false
 }
+
+// EntryConfLockPath is the lock serializing writers of an entry config
+// (`vlr cascade up` and the daemon's hook migration).
+func EntryConfLockPath(confPath string) string { return confPath + ".lock" }
 
 // MigrateEntryHooksData rewrites vlr-generated legacy hooks in an entry config
 // to EntryHooks. idempotent reports whether the result carries exactly the
@@ -239,6 +252,11 @@ func MigrateEntryHooksData(data string, fw int) (out string, changed, idempotent
 // atomically and keeping its permissions. The running tunnel is not touched:
 // the new hooks take effect on its next start.
 func MigrateEntryHooks(path string, fw int) (changed, idempotent bool, err error) {
+	unlock, err := flock.Lock(EntryConfLockPath(path))
+	if err != nil {
+		return false, false, err
+	}
+	defer unlock()
 	fi, err := os.Stat(path)
 	if err != nil {
 		return false, false, err

@@ -174,7 +174,7 @@ func TestWriteIfChanged(t *testing.T) {
 
 func TestFormatEgress(t *testing.T) {
 	out := FormatEgress(RuleState{}, nil, EgressResult{Marked: "158.160.236.81", Direct: "158.160.236.81"})
-	if !strings.Contains(out, "каскад обходится") || strings.Count(out, "[FAIL]") != 4 {
+	if !strings.Contains(out, "каскад обходится") || strings.Count(out, "[FAIL]") != 3 || !strings.Contains(out, "[WARN]") {
 		t.Fatalf("bypass not reported:\n%s", out)
 	}
 	ok := EgressResult{Marked: "94.237.13.233", Direct: "158.160.236.81"}

@@ -100,7 +100,11 @@ func FormatEgress(st RuleState, stErr error, eg EgressResult) string {
 		fmt.Fprintf(&b, "маршрутизация каскада [FAIL]\n  logs: %v\n", stErr)
 	} else {
 		fmt.Fprintf(&b, "правило fwmark → туннель %s\n", mark(st.Fwmark))
-		fmt.Fprintf(&b, "правило oif → туннель    %s\n", mark(st.Oif))
+		oif := "[OK]"
+		if !st.Oif {
+			oif = "[WARN] — трафик Xray не затронут, врут только проверки сайтов"
+		}
+		fmt.Fprintf(&b, "правило oif → туннель    %s\n", oif)
 		fmt.Fprintf(&b, "маршрут в таблице туннеля %s\n", mark(st.Route))
 	}
 	switch {

@@ -108,8 +108,10 @@ func TestMigrateEntryHooksFileKeepsMode(t *testing.T) {
 		t.Fatalf("mode %v", fi.Mode().Perm())
 	}
 	entries, _ := os.ReadDir(filepath.Dir(p))
-	if len(entries) != 1 {
-		t.Fatalf("temp file left behind: %v", entries)
+	for _, e := range entries {
+		if n := e.Name(); n != "wg-cascade.conf" && n != "wg-cascade.conf.lock" {
+			t.Fatalf("temp file left behind: %v", entries)
+		}
 	}
 }
 
@@ -121,5 +123,20 @@ func TestRenderEntryHooksAreMigrated(t *testing.T) {
 	}
 	if _, changed, idem := MigrateEntryHooksData(conf, 51820); changed || !idem {
 		t.Fatalf("fresh render not canonical: changed=%v idem=%v", changed, idem)
+	}
+}
+
+func TestMigrateEntryHooksRejectsLowercaseLegacy(t *testing.T) {
+	// awg-quick keys are case-insensitive: an unrecognized lowercase "postup"
+	// with `route add` must block the rewrite, not be kept next to new hooks.
+	conf := strings.Replace(legacyEntryConf,
+		"PostUp = ip route add default dev %i table 51820; ip rule add fwmark 51820 table 51820\nPostUp = ip rule add oif %i table 51820\nPostDown = ip rule del fwmark 51820 table 51820 2>/dev/null || true\n",
+		"PostDown = ip rule del fwmark 51820 table 51820 2>/dev/null || true\npostup = ip route add default dev %i table 51820\nPostUp = ip rule add oif %i table 51820\n", 1)
+	if !strings.Contains(conf, "postup = ") {
+		t.Fatal("fixture not applied")
+	}
+	out, changed, idem := MigrateEntryHooksData(conf, 51820)
+	if changed || idem || out != conf {
+		t.Fatalf("lowercase hook mishandled: changed=%v idem=%v", changed, idem)
 	}
 }
