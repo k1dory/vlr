@@ -212,6 +212,15 @@ func cmdCascadeUp(args []string) error {
 		return err
 	}
 	fmt.Printf("✓ автозапуск туннеля: %t (RU и EU)\n", *autostart)
+	// systemd-networkd flushes "foreign" ip rules on every start (e.g. after an
+	// unattended libc upgrade), silently sending Xray egress out the RU address.
+	networkdDropIn := false
+	if created, err := cascade.EnsureNetworkdKeepsRules(cascade.NetworkdDropIn); err != nil {
+		fmt.Printf("⚠ не удалось записать %s: %v — правила каскада может сбросить перезапуск networkd\n", cascade.NetworkdDropIn, err)
+	} else if created {
+		networkdDropIn = true
+		fmt.Printf("✓ networkd больше не сбрасывает правила каскада (%s)\n", cascade.NetworkdDropIn)
+	}
 
 	// Record what we just created so `vlr uninstall` can reverse it. The EU exit
 	// stores host/user/port/key for remote teardown — never the password.
@@ -223,6 +232,9 @@ func cmdCascadeUp(args []string) error {
 		_ = ledger.Record(lp, ledger.KindPackage, "amneziawg", nil)
 	}
 	_ = ledger.Record(lp, ledger.KindFile, wgPath, nil)
+	if networkdDropIn {
+		_ = ledger.Record(lp, ledger.KindFile, cascade.NetworkdDropIn, nil)
+	}
 	_ = ledger.Record(lp, ledger.KindWGIface, *iface, map[string]string{"transport": "awg"})
 	_ = ledger.Record(lp, ledger.KindEUExit, *euHost, map[string]string{
 		"user": *euUser, "port": fmt.Sprintf("%d", *euPort),
@@ -381,9 +393,22 @@ func cmdCascadeCheck(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	// The site probes below bind curl to the tunnel, so they pass even when the
+	// fwmark rules are gone and Xray egress bypasses the cascade. Check the path
+	// Xray actually takes first: the policy rules and the marked egress IP.
+	st, stErr := cascade.ReadRules(ctx, c.Cascade.Interface, config.CascadeFwmark)
+	eg := cascade.Egress(ctx, config.CascadeFwmark, *timeout)
+	fmt.Print(cascade.FormatEgress(st, stErr, eg))
+	routingOK := stErr == nil && st.OK() && eg.OK()
+
 	results := cascade.HealthcheckProgress(ctx, c.Cascade.Interface, sites, *timeout, func(r cascade.SiteResult) {
 		fmt.Print(cascade.FormatResults([]cascade.SiteResult{r}))
 	})
+	if !routingOK {
+		return fmt.Errorf("трафик Xray идёт мимо каскада (см. строки [FAIL] выше); правила восстанавливает демон vlr, вручную: systemctl restart %s-quick@%s",
+			c.Cascade.Tool(), c.Cascade.Interface)
+	}
 	for _, r := range results {
 		if !r.OK {
 			return fmt.Errorf("some sites unreachable through the cascade")
