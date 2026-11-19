@@ -48,6 +48,40 @@ H1–H4 parameters; it does not configure the newer AWG 2/3 extensions.
      default route into tunnel                        MASQUERADE -> eth0 -> Internet
 ```
 
+## Kill-switch (fail closed while the tunnel is down)
+
+Policy routing on the RU entry, in evaluation order:
+
+```
+32764: from all oif wg-cascade lookup 51820   # tunnel PostUp (probes bound to the iface)
+32765: from all fwmark 0xca6c lookup 51820    # tunnel PostUp: marked Xray egress -> tunnel table
+32765: from all fwmark 0xca6c blackhole       # kill-switch (vlr)
+32766: from all lookup main
+```
+
+Table 51820 holds a single route, `default dev wg-cascade`. When the tunnel
+goes down (awg-quick restart, interface gone, reboot before the tunnel is up)
+that route vanishes and PostDown removes the tunnel rule. Without the kill-switch
+the lookup falls through to `main`, and EU-bound client traffic **silently
+leaves from the RU address**. The kill-switch rule is evaluated after the tunnel
+rule, so with the tunnel up it is never reached. With the tunnel down it drops
+marked traffic. Unmarked traffic (SSH, heartbeat, split-tunnel `egress-ru`) is
+not affected.
+
+- It is a separate rule rather than a route in table 51820 because PostDown
+  deletes `fwmark … table 51820`. A blackhole rule has no table and survives that
+  delete. The tunnel rule is re-added without a priority, and the kernel then
+  puts it at (lowest non-local priority − 1), always before the kill-switch.
+- Behaviour during an outage: established TCP flows survive a short restart
+  through retransmits. New connections opened during the gap fail fast and are
+  retried by the client. Nothing leaves through the RU address.
+- Installed by `vlr cascade up` (before the tunnel is cycled) and `vlr up`. A
+  drop-in `/etc/systemd/system/xray.service.d/20-vlr-killswitch.conf` re-adds it
+  before every Xray start, which covers the boot window. The daemon's cascade
+  guard restores it every 30 s. A kill-switch found **before** the tunnel rule
+  would blackhole all EU traffic, so the guard removes it and logs an error.
+- `vlr uninstall` removes the rule and the drop-in together with the tunnel.
+
 ## Bring up the cascade — one command from the RU node
 
 You do **not** log into the EU box. From the **RU** node, `vlr cascade up` does the

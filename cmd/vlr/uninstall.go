@@ -220,8 +220,13 @@ func cmdUninstall(args []string) error {
 		rmf("/etc/wireguard/" + i + ".conf")
 	}
 	if len(ifaces) > 0 {
-		// The daemon may have installed it without a ledger entry (upgraded nodes).
+		// The daemon may have installed these without a ledger entry (upgraded nodes).
 		rmf(cascade.NetworkdDropIn)
+		// Tunnel is gone: the kill-switch would now blackhole any marked socket.
+		step("снимаю kill-switch каскада")
+		cascade.RemoveKillSwitch(context.Background(), config.CascadeFwmark)
+		rmf(cascade.KillSwitchDropIn)
+		sys("systemctl", "daemon-reload")
 	}
 
 	// D. systemd unit.

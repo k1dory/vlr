@@ -199,6 +199,9 @@ func cmdCascadeUp(args []string) error {
 	if err != nil {
 		return fmt.Errorf("write %s: %w", wgPath, err)
 	}
+	// Kill-switch first: the down/up below must not let marked Xray traffic
+	// out through the RU default route.
+	installKillSwitch(ctx, ledger.DefaultPath(filepath.Dir(savePath)))
 	fmt.Printf("==> поднимаю туннель RU (%s)\n", *iface)
 	_ = exec.CommandContext(ctx, "awg-quick", "down", *iface).Run() // ignore if not up
 	// Best-effort: drop a stale "not fwmark" policy rule left by older versions,
