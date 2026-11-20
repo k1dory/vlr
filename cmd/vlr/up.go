@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/k1dory/vlr/internal/cascade"
 	"github.com/k1dory/vlr/internal/config"
 	"github.com/k1dory/vlr/internal/ledger"
 	"github.com/k1dory/vlr/internal/store"
@@ -52,6 +54,9 @@ func cmdUp(args []string) error {
 	// 2. Ensure the Xray service may set SO_MARK (needed to mark EU-bound traffic
 	// into the cascade). A systemd drop-in is non-destructive.
 	ensureXrayNetAdmin(lp)
+	if c.Cascade.Enabled {
+		installKillSwitch(context.Background(), lp)
+	}
 
 	// 3. Render + reload.
 	if c.Xray.ConfigPath == "" {
@@ -120,6 +125,30 @@ func installXray() error {
 		return fmt.Errorf("Xray install failed: %w (поставь вручную)", err)
 	}
 	return nil
+}
+
+// installKillSwitch puts the cascade kill-switch in place now (ip rule) and for
+// every future Xray start (systemd drop-in), so marked EU-bound traffic is
+// dropped rather than leaked through the RU default route while the tunnel is
+// down. Best-effort: failures are printed, the vlr daemon keeps retrying the rule.
+func installKillSwitch(ctx context.Context, lp string) {
+	if added, err := cascade.EnsureKillSwitch(ctx, config.CascadeFwmark); err != nil {
+		fmt.Printf("⚠ kill-switch каскада: %v\n", err)
+	} else if added {
+		fmt.Printf("✓ kill-switch каскада: при падении туннеля EU-трафик отбрасывается, а не уходит с RU-адреса (ip rule pref %d)\n", cascade.KillSwitchPref)
+	}
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return
+	}
+	changed, err := cascade.EnsureKillSwitchDropIn(cascade.KillSwitchDropIn, config.CascadeFwmark)
+	if err != nil {
+		fmt.Printf("⚠ не удалось записать %s: %v\n", cascade.KillSwitchDropIn, err)
+		return
+	}
+	if changed {
+		_ = ledger.Record(lp, ledger.KindFile, cascade.KillSwitchDropIn, nil)
+		_ = exec.Command("systemctl", "daemon-reload").Run()
+	}
 }
 
 // ensureXrayNetAdmin writes a systemd drop-in granting CAP_NET_ADMIN to xray, so

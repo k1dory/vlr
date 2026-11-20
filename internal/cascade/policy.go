@@ -225,7 +225,27 @@ func GuardRules(ctx context.Context, log *slog.Logger, iface, unit string, mark 
 		every = 30 * time.Second
 	}
 	check := func() {
+		// The kill-switch never touches the tunnel's rules, so it is kept in
+		// place even while awg-quick is mid-restart — that is exactly when it
+		// matters. Report-only mode (custom hooks) writes nothing at all.
 		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if repair {
+			ksAdded, err := EnsureKillSwitch(cctx, mark)
+			switch {
+			case err != nil && ctx.Err() == nil:
+				log.Error("cascade kill-switch", "err", err)
+			case ksAdded:
+				log.Warn("cascade kill-switch was missing; restored (marked traffic is dropped, not leaked, while the tunnel is down)",
+					"pref", KillSwitchPref)
+			}
+		} else if out, err := runIP(cctx, "-N", "-4", "rule", "show"); err == nil {
+			if ks := ParseKillSwitch(string(out), mark); !ks.Present || ks.Shadowing {
+				log.Error("cascade kill-switch is missing or shadows the tunnel rule (not repairing: custom tunnel hooks)",
+					"present", ks.Present, "shadowing", ks.Shadowing, "pref", KillSwitchPref)
+			}
+		}
+		cancel()
+		cctx, cancel = context.WithTimeout(ctx, 10*time.Second)
 		st, err := ReadRules(cctx, iface, mark)
 		cancel()
 		if err != nil {

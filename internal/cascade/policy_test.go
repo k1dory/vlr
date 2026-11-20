@@ -74,10 +74,28 @@ func (f *fakeIP) run(_ context.Context, args ...string) ([]byte, error) {
 		return []byte(f.routes), nil
 	case f.failAdd:
 		return nil, errors.New("boom")
+	// Like the kernel: a rule added without a priority lands before every
+	// existing non-local rule (lowest non-local priority - 1).
 	case strings.HasPrefix(cmd, "-4 rule add fwmark"):
-		f.rules += "100: from all fwmark 0xca6c lookup 51820\n"
+		f.rules = "100: from all fwmark 0xca6c lookup 51820\n" + f.rules
 	case strings.HasPrefix(cmd, "-4 rule add oif"):
-		f.rules += "101: from all oif wg-cascade lookup 51820\n"
+		f.rules = "101: from all oif wg-cascade lookup 51820\n" + f.rules
+	case cmd == "-4 rule add pref 32765 fwmark 51820 blackhole":
+		f.rules += "32765: from all fwmark 0xca6c blackhole\n"
+	case cmd == "-4 rule del pref 32765 fwmark 51820 blackhole":
+		var kept []string
+		removed := false
+		for _, l := range strings.SplitAfter(f.rules, "\n") {
+			if !removed && strings.Join(strings.Fields(l), " ") == "32765: from all fwmark 0xca6c blackhole" {
+				removed = true
+				continue
+			}
+			kept = append(kept, l)
+		}
+		if !removed {
+			return nil, errors.New("RTNETLINK answers: No such file or directory")
+		}
+		f.rules = strings.Join(kept, "")
 	case strings.HasPrefix(cmd, "-4 route replace"):
 		f.routes = "default dev wg-cascade scope link\n"
 	}
@@ -237,5 +255,8 @@ func TestGuardRepairs(t *testing.T) {
 	<-done
 	if st := ParseRules(f.rules, "wg-cascade", 51820); !st.Fwmark || !st.Oif {
 		t.Fatalf("not repaired: %s", f.rules)
+	}
+	if ks := ParseKillSwitch(f.rules, 51820); !ks.Present || ks.Shadowing {
+		t.Fatalf("kill-switch not installed behind the tunnel rule: %+v\n%s", ks, f.rules)
 	}
 }
