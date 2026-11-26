@@ -22,7 +22,8 @@ vlr uninstall --eu-key ~/.ssh/id_ed25519   # creds for EU teardown (or --eu-pass
 2. **EU exit (remote)** — SSH in and `wg-quick down` + disable + remove the conf
    and keys. Needs SSH creds again (see below).
 3. **Local WireGuard** — `wg-quick down <iface>`, disable `wg-quick@<iface>`,
-   remove the lingering split-tunnel `ip rule`, delete `/etc/wireguard/<iface>.conf`.
+   remove the lingering split-tunnel `ip rule`, delete `/etc/wireguard/<iface>.conf`,
+   remove the cascade kill-switch rule and its Xray drop-in (see `CASCADE.md`).
 4. **systemd unit** — remove the unit, `daemon-reload`, `reset-failed`.
 5. **Go** — only if vlr installed it *and* `--remove-go`.
 6. **Packages** — only ones vlr installed *and* `--remove-packages`.
